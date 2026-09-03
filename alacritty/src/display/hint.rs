@@ -396,10 +396,15 @@ pub fn highlighted_at<T>(
 
     config.hints.enabled.iter().find_map(|hint| {
         // Check if all required modifiers are pressed.
+        //
+        // Fork: in mouse mode `CONTROL` is accepted in addition to `SHIFT`, so
+        // hints (e.g. OSC 8 links inside mouse-reporting TUIs) can be
+        // highlighted and clicked without suppressing mouse reporting first.
         let highlight = hint.mouse.is_some_and(|mouse| {
             mouse.enabled
                 && mouse_mods.contains(mouse.mods.0)
-                && (!mouse_mode || mouse_mods.contains(ModifiersState::SHIFT))
+                && (!mouse_mode
+                    || mouse_mods.intersects(ModifiersState::SHIFT | ModifiersState::CONTROL))
         });
         if !highlight {
             return None;

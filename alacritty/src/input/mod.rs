@@ -30,6 +30,7 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Point, Side};
 use alacritty_terminal::selection::SelectionType;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::{ClipboardType, Term, TermMode};
 use alacritty_terminal::vi_mode::ViMotion;
@@ -41,7 +42,7 @@ use crate::config::window::Decorations;
 use crate::config::{
     Action, BindingMode, MouseAction, MouseEvent, SearchAction, UiConfig, ViAction,
 };
-use crate::display::hint::HintMatch;
+use crate::display::hint::{HintMatch, highlighted_at};
 use crate::display::window::{ImeInhibitor, Window};
 use crate::display::{Display, SizeInfo};
 use crate::event::{
@@ -76,6 +77,9 @@ const CLICK_THRESHOLD: Duration = Duration::from_millis(400);
 /// are activated.
 pub struct Processor<T: EventListener, A: ActionContext<T>> {
     pub ctx: A,
+    /// Fork: the last key press was consumed by a binding, so its kitty
+    /// release event (`REPORT_EVENT_TYPES`) must be suppressed as well.
+    suppress_next_key_release: bool,
     _phantom: PhantomData<T>,
 }
 
@@ -447,7 +451,7 @@ impl<T: EventListener> Execute<T> for Action {
 
 impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     pub fn new(ctx: A) -> Self {
-        Self { ctx, _phantom: Default::default() }
+        Self { ctx, suppress_next_key_release: false, _phantom: Default::default() }
     }
 
     #[inline]
@@ -615,6 +619,28 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_press(&mut self, button: MouseButton) {
+        // Fork: take over clicks from applications with mouse reporting
+        // enabled when a hint (e.g. an OSC 8 link) is under the cursor and the
+        // hint modifiers are held, so links work inside TUIs like Claude Code.
+        // Only the left button is taken over; others are reported as usual.
+        if button == MouseButton::Left
+            && !self.ctx.modifiers().state().shift_key()
+            && self.ctx.mouse_mode()
+        {
+            let display_offset = self.ctx.terminal().grid().display_offset();
+            let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+            let mods = self.ctx.modifiers().state();
+            if let Some(hint) = highlighted_at(self.ctx.terminal(), self.ctx.config(), point, mods)
+            {
+                self.ctx.mouse_mut().click_state = ClickState::None;
+                // The mouse moved onto the link, so the launcher is blocked —
+                // unblock it or the trigger would be dropped.
+                self.ctx.mouse_mut().block_hint_launcher = false;
+                self.ctx.trigger_hint(&hint);
+                return;
+            }
+        }
+
         // Handle mouse mode.
         if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
             self.ctx.mouse_mut().click_state = ClickState::None;
@@ -663,6 +689,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         match self.ctx.mouse().click_state {
             ClickState::Click => {
+                // Fork: move the shell cursor to the clicked position when the
+                // click lands on the cursor's row of the primary screen.
+                self.reposition_cursor_to_click(point);
+
                 // Don't launch URLs if this click cleared the selection.
                 self.ctx.mouse_mut().block_hint_launcher = !self.ctx.selection_is_empty();
 
@@ -693,7 +723,86 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
     }
 
+    /// Fork: move the shell cursor to the clicked cell within the cursor's row.
+    ///
+    /// The terminal grid is the single source of truth for the cursor position,
+    /// so this is deterministic — unlike ConPTY-mediated repositioning. The
+    /// click only takes effect on the cursor's row of the primary screen:
+    /// cross-line movement is intentionally unsupported since `Up`/`Down`
+    /// would trigger history navigation in the shell.
+    fn reposition_cursor_to_click(&mut self, point: Point) {
+        let term = self.ctx.terminal();
+        // TUIs (vim, less, ...) live on the alternate screen; leave their
+        // clicks alone. Vi mode has its own cursor handling.
+        if term.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI) {
+            return;
+        }
+
+        let cursor = term.grid().cursor.point;
+        if cursor.line != point.line {
+            return;
+        }
+
+        let cursor_col = cursor.column.0;
+        let mut click_col = point.column.0;
+        if click_col == cursor_col {
+            return;
+        }
+
+        // Count the actual characters between the cursor and the click,
+        // skipping the trailing half of wide characters: the shell moves the
+        // cursor per character, not per grid column.
+        let grid = term.grid();
+        if click_col < cursor_col && grid[point].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            // Clicking the right half of a wide char targets that char itself.
+            click_col -= 1;
+        }
+        let (range, right) = if click_col > cursor_col {
+            ((cursor_col + 1)..(click_col + 1), true)
+        } else {
+            (click_col..cursor_col, false)
+        };
+
+        let count = range
+            .filter(|col| !grid[point.line][Column(*col)].flags.contains(Flags::WIDE_CHAR_SPACER))
+            .count();
+        if count == 0 {
+            return;
+        }
+
+        let seq: &[u8] = if right {
+            if term.mode().contains(TermMode::APP_CURSOR) { b"\x1bOC" } else { b"\x1b[C" }
+        } else if term.mode().contains(TermMode::APP_CURSOR) {
+            b"\x1bOD"
+        } else {
+            b"\x1b[D"
+        };
+
+        let mut bytes = Vec::with_capacity(3 * count);
+        for _ in 0..count {
+            bytes.extend_from_slice(seq);
+        }
+        self.ctx.write_to_pty(bytes);
+    }
+
     fn on_mouse_release(&mut self, button: MouseButton) {
+        // Fork: mirror of the press takeover — don't report the release of a
+        // click that was taken over (and don't trigger the hint again; the
+        // press already did). If the modifiers were released before the button
+        // the release is reported to the application, which tolerates
+        // unmatched releases.
+        if button == MouseButton::Left
+            && !self.ctx.modifiers().state().shift_key()
+            && self.ctx.mouse_mode()
+        {
+            let display_offset = self.ctx.terminal().grid().display_offset();
+            let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+            let mods = self.ctx.modifiers().state();
+            if highlighted_at(self.ctx.terminal(), self.ctx.config(), point, mods).is_some() {
+                return;
+            }
+        }
+
         if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
             let code = match button {
                 MouseButton::Left => 0,

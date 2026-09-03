@@ -58,6 +58,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         // Key bindings suppress the character input.
         if self.process_key_bindings(&key) {
+            // Fork: a binding-consumed press must not leak its kitty release
+            // event, otherwise apps still see e.g. `Ctrl+C` after a copy.
+            self.suppress_next_key_release = true;
             return;
         }
 
@@ -205,7 +208,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         };
 
         // Get the action of a key binding.
-        let mut binding_action = |binding: &KeyBinding| {
+        let binding_action = |binding: &KeyBinding| {
             let key = match (&binding.trigger, &logical_key) {
                 (BindingKey::Scancode(_), _) => BindingKey::Scancode(key.physical_key),
                 (_, code) => {
@@ -214,10 +217,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             };
 
             if binding.is_triggered_by(mode, mods, &key) {
-                // Pass through the key if any of the bindings has the `ReceiveChar` action.
-                *suppress_chars.get_or_insert(true) &= binding.action != Action::ReceiveChar;
-
-                // Binding was triggered; run the action.
+                // Binding was triggered; run the action. Whether the key is
+                // suppressed from reaching the PTY is decided by the caller.
                 Some(binding.action.clone())
             } else {
                 None
@@ -228,6 +229,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         for i in 0..self.ctx.config().key_bindings().len() {
             let binding = &self.ctx.config().key_bindings()[i];
             if let Some(action) = binding_action(binding) {
+                // Fork: smart pass-through for `Copy`. Without a selection the
+                // key is released to the PTY, so `Ctrl+C` still sends `^C` to
+                // interrupt the running program (Windows Terminal behavior).
+                let bypass = action == Action::Copy
+                    && !mode.contains(BindingMode::VI)
+                    && self.ctx.selection_is_empty();
+                if bypass {
+                    continue;
+                }
+
+                // Pass through the key if any of the bindings has the `ReceiveChar` action.
+                *suppress_chars.get_or_insert(true) &= action != Action::ReceiveChar;
+
                 action.execute(&mut self.ctx);
             }
         }
@@ -241,6 +255,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             };
 
             if let Some(action) = binding_action(binding) {
+                // Pass through the key if any of the bindings has the `ReceiveChar` action.
+                *suppress_chars.get_or_insert(true) &= action != Action::ReceiveChar;
+
                 action.execute(&mut self.ctx);
             }
         }
@@ -250,6 +267,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Handle key release.
     fn key_release(&mut self, key: KeyEvent, mode: TermMode, mods: ModifiersState) {
+        // Fork: consume the suppression flag set by a binding-consumed press.
+        if self.suppress_next_key_release {
+            self.suppress_next_key_release = false;
+            return;
+        }
+
         if !mode.contains(TermMode::REPORT_EVENT_TYPES)
             || mode.contains(TermMode::VI)
             || self.ctx.search_active()
