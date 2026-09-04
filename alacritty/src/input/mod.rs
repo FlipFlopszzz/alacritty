@@ -68,7 +68,9 @@ const SELECTION_SCROLLING_STEP: f64 = 20.;
 /// Distance before a touch input is considered a drag.
 const MAX_TAP_DISTANCE: f64 = 20.;
 
-/// Threshold used for double_click/triple_click.
+/// Fork: multi-click interval reference used by the input tests; the runtime
+/// value comes from `mouse.double_click_interval` in the config.
+#[cfg(test)]
 const CLICK_THRESHOLD: Duration = Duration::from_millis(400);
 
 /// Processes input from winit.
@@ -667,14 +669,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.mouse_mut().last_click_timestamp = now;
 
             // Update multi-click state.
+            //
+            // Fork: the interval is configurable via `mouse.double_click_interval`.
+            let click_threshold =
+                Duration::from_millis(u64::from(self.ctx.config().mouse.double_click_interval));
             self.ctx.mouse_mut().click_state = match self.ctx.mouse().click_state {
                 // Reset click state if button has changed.
                 _ if button != self.ctx.mouse().last_click_button => {
                     self.ctx.mouse_mut().last_click_button = button;
                     ClickState::Click
                 },
-                ClickState::Click if elapsed < CLICK_THRESHOLD => ClickState::DoubleClick,
-                ClickState::DoubleClick if elapsed < CLICK_THRESHOLD => ClickState::TripleClick,
+                ClickState::Click if elapsed < click_threshold => ClickState::DoubleClick,
+                ClickState::DoubleClick if elapsed < click_threshold => ClickState::TripleClick,
                 _ => ClickState::Click,
             };
 
@@ -729,13 +735,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
     }
 
-    /// Fork: move the shell cursor to the clicked cell within the cursor's row.
+    /// Fork: move the shell cursor towards the clicked cell.
     ///
     /// The terminal grid is the single source of truth for the cursor position,
-    /// so this is deterministic — unlike ConPTY-mediated repositioning. The
-    /// click only takes effect on the cursor's row of the primary screen:
-    /// cross-line movement is intentionally unsupported since `Up`/`Down`
-    /// would trigger history navigation in the shell.
+    /// so this is deterministic — unlike ConPTY-mediated repositioning.
+    ///
+    /// Same row: move by the character distance between the cursor and the
+    /// click (wide characters counted via their grid flags).
+    ///
+    /// Rows below: move `Down` per row difference, keeping the current column.
+    /// Within a wrapped command line this navigates its display rows; past its
+    /// end `Down` is a harmless no-op in common shells. Rows above are
+    /// intentionally not supported: `Up` past the top of the command line
+    /// triggers history navigation, which would be destructive.
     fn reposition_cursor_to_click(&mut self, point: Point) {
         let term = self.ctx.terminal();
         // TUIs (vim, less, ...) live on the alternate screen; leave their
@@ -745,10 +757,27 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         let cursor = term.grid().cursor.point;
-        if cursor.line != point.line {
+
+        // Rows below the cursor: `Down` per row, column-preserving.
+        let line_delta = point.line.0 - cursor.line.0;
+        if line_delta > 0 {
+            let seq: &[u8] =
+                if term.mode().contains(TermMode::APP_CURSOR) { b"\x1bOB" } else { b"\x1b[B" };
+
+            let mut bytes = Vec::with_capacity(seq.len() * line_delta as usize);
+            for _ in 0..line_delta {
+                bytes.extend_from_slice(seq);
+            }
+            self.ctx.write_to_pty(bytes);
             return;
         }
 
+        // Clicks above the cursor row are not supported.
+        if line_delta < 0 {
+            return;
+        }
+
+        // Same row: column movement.
         let cursor_col = cursor.column.0;
         let mut click_col = point.column.0;
         if click_col == cursor_col {
@@ -1407,7 +1436,11 @@ mod tests {
             #[test]
             fn $name() {
                 let mut clipboard = Clipboard::new_nop();
-                let cfg = UiConfig::default();
+                let mut cfg = UiConfig::default();
+                // Pin the interval so the test doesn't depend on the system
+                // double click time.
+                cfg.mouse.double_click_interval =
+                    u16::try_from(CLICK_THRESHOLD.as_millis()).unwrap_or(u16::MAX);
                 let size = SizeInfo::new(
                     21.0,
                     51.0,
