@@ -743,11 +743,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Same row: move by the character distance between the cursor and the
     /// click (wide characters counted via their grid flags).
     ///
-    /// Rows below: move `Down` per row difference, keeping the current column.
-    /// Within a wrapped command line this navigates its display rows; past its
-    /// end `Down` is a harmless no-op in common shells. Rows above are
-    /// intentionally not supported: `Up` past the top of the command line
-    /// triggers history navigation, which would be destructive.
+    /// Other rows: one arrow key per row difference, keeping the current
+    /// column. Within a wrapped command line this navigates its display rows.
+    /// Clicks past the command line's top/bottom walk into shell history
+    /// browsing, which is reversible with the opposite arrow (shells keep the
+    /// in-progress edit on the history stack) — accepted for parity with
+    /// Windows Terminal.
     fn reposition_cursor_to_click(&mut self, point: Point) {
         let term = self.ctx.terminal();
         // TUIs (vim, less, ...) live on the alternate screen; leave their
@@ -758,22 +759,22 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let cursor = term.grid().cursor.point;
 
-        // Rows below the cursor: `Down` per row, column-preserving.
+        // Cross-row: one arrow key per row difference, column-preserving.
         let line_delta = point.line.0 - cursor.line.0;
-        if line_delta > 0 {
-            let seq: &[u8] =
-                if term.mode().contains(TermMode::APP_CURSOR) { b"\x1bOB" } else { b"\x1b[B" };
+        if line_delta != 0 {
+            let seq: &[u8] = match (line_delta > 0, term.mode().contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOB",
+                (true, false) => b"\x1b[B",
+                (false, true) => b"\x1bOA",
+                (false, false) => b"\x1b[A",
+            };
 
-            let mut bytes = Vec::with_capacity(seq.len() * line_delta as usize);
-            for _ in 0..line_delta {
+            let count = line_delta.unsigned_abs() as usize;
+            let mut bytes = Vec::with_capacity(seq.len() * count);
+            for _ in 0..count {
                 bytes.extend_from_slice(seq);
             }
             self.ctx.write_to_pty(bytes);
-            return;
-        }
-
-        // Clicks above the cursor row are not supported.
-        if line_delta < 0 {
             return;
         }
 
