@@ -174,18 +174,16 @@ impl Scrollbar {
         }
 
         let bg_rect = self.bg_rect(display_size);
-        let scrollbar_rect = self.rect_from_bg_rect(bg_rect, display_size);
+        // Fork: the whole trough (not just the handle) is interactive —
+        // clicking anywhere on it starts a drag from that position.
         let mouse_x = mouse_x as f32;
         let mouse_y = display_size.height - mouse_y as f32;
 
-        if !(scrollbar_rect.x as f32..(scrollbar_rect.x + scrollbar_rect.width) as f32)
-            .contains(&mouse_x)
-        {
+        if !(bg_rect.x as f32..(bg_rect.x + bg_rect.width) as f32).contains(&mouse_x) {
             return false;
         }
 
-        (scrollbar_rect.y as f32..(scrollbar_rect.y + scrollbar_rect.height) as f32)
-            .contains(&mouse_y)
+        (bg_rect.y as f32..(bg_rect.y + bg_rect.height) as f32).contains(&mouse_y)
     }
 
     pub fn try_start_drag(

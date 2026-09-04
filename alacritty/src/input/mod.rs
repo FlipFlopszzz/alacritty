@@ -520,11 +520,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // Don't launch URLs if mouse has moved.
         self.ctx.mouse_mut().block_hint_launcher = true;
 
-        if (lmb_pressed || rmb_pressed)
+        // Fork: while dragging the scrollbar, suppress text selection and
+        // mouse reporting — the drag only scrolls.
+        let scrollbar_dragging = self.ctx.config().scrollbar.mode != ScrollbarMode::Never
+            && self.ctx.display().scrollbar.is_dragging();
+
+        if !scrollbar_dragging
+            && (lmb_pressed || rmb_pressed)
             && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
         {
             self.ctx.update_selection(point, cell_side);
-        } else if cell_changed
+        } else if !scrollbar_dragging
+            && cell_changed
             && self.ctx.terminal().mode().intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG)
         {
             if lmb_pressed {
@@ -638,6 +645,23 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_press(&mut self, button: MouseButton) {
+        // Fork: take over left clicks on the scrollbar even inside
+        // mouse-reporting TUIs (e.g. Claude Code), so it stays draggable
+        // there. Checked before the hint takeover since the two regions are
+        // mutually exclusive (scrollbar vs text area).
+        if button == MouseButton::Left
+            && !self.ctx.modifiers().state().shift_key()
+            && self.ctx.mouse_mode()
+        {
+            let size_info = self.ctx.size_info();
+            let mouse_x = self.ctx.mouse().x;
+            let mouse_y = self.ctx.mouse().y;
+            if self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+                self.ctx.mouse_mut().click_state = ClickState::None;
+                return;
+            }
+        }
+
         // Fork: take over clicks from applications with mouse reporting
         // enabled when a hint (e.g. an OSC 8 link) is under the cursor and the
         // hint modifiers are held, so links work inside TUIs like Claude Code.
@@ -663,6 +687,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // Handle mouse mode.
         if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
             self.ctx.mouse_mut().click_state = ClickState::None;
+
+            // Fork: take over left clicks on the scrollbar even inside
+            // mouse-reporting TUIs, so it can be dragged in Claude Code too.
+            if button == MouseButton::Left {
+                let size_info = self.ctx.size_info();
+                let mouse_x = self.ctx.mouse().x;
+                let mouse_y = self.ctx.mouse().y;
+                if self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+                    return;
+                }
+            }
 
             let code = match button {
                 MouseButton::Left => 0,
@@ -823,6 +858,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     fn on_mouse_release(&mut self, button: MouseButton) {
         // Fork: stop scrollbar dragging when the drag was on the scrollbar.
+        // Under mouse reporting the release is not reported either — it
+        // belongs to the scrollbar drag, not to the application.
         if self.ctx.config().scrollbar.mode != ScrollbarMode::Never
             && self.ctx.display().scrollbar.is_dragging()
         {
@@ -830,6 +867,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // Mouse icon is different when not scrolling.
             let mouse_state = self.cursor_state();
             self.ctx.window().set_mouse_cursor(mouse_state);
+            if self.ctx.mouse_mode() {
+                return;
+            }
         }
 
         // Fork: mirror of the press takeover — don't report the release of a
@@ -1249,10 +1289,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Icon state of the cursor.
     fn cursor_state(&mut self) -> CursorIcon {
-        // Fork: scrollbar dragging/hover takes priority.
+        // Fork: scrollbar dragging/hover takes priority. Keep the regular
+        // arrow cursor instead of a resize cursor.
         if self.ctx.config().scrollbar.mode != ScrollbarMode::Never {
             if self.ctx.display().scrollbar.is_dragging() {
-                return CursorIcon::RowResize;
+                return CursorIcon::Default;
             }
             let display_size = self.ctx.size_info();
             let mouse_x = self.ctx.mouse().x;
