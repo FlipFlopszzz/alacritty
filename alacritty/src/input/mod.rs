@@ -735,20 +735,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
     }
 
-    /// Fork: move the shell cursor towards the clicked cell.
+    /// Fork: move the shell cursor to the clicked cell within the cursor's row.
     ///
     /// The terminal grid is the single source of truth for the cursor position,
-    /// so this is deterministic — unlike ConPTY-mediated repositioning.
-    ///
-    /// Same row: move by the character distance between the cursor and the
-    /// click (wide characters counted via their grid flags).
-    ///
-    /// Other rows: one arrow key per row difference, keeping the current
-    /// column. Within a wrapped command line this navigates its display rows.
-    /// Clicks past the command line's top/bottom walk into shell history
-    /// browsing, which is reversible with the opposite arrow (shells keep the
-    /// in-progress edit on the history stack) — accepted for parity with
-    /// Windows Terminal.
+    /// so this is deterministic. Cross-line movement is intentionally not
+    /// supported: for soft-wrapped single-line commands `Up`/`Down` trigger
+    /// history navigation in the shell, and the terminal cannot tell which
+    /// display rows belong to the current command without shell integration.
     fn reposition_cursor_to_click(&mut self, point: Point) {
         let term = self.ctx.terminal();
         // TUIs (vim, less, ...) live on the alternate screen; leave their
@@ -758,27 +751,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         let cursor = term.grid().cursor.point;
-
-        // Cross-row: one arrow key per row difference, column-preserving.
-        let line_delta = point.line.0 - cursor.line.0;
-        if line_delta != 0 {
-            let seq: &[u8] = match (line_delta > 0, term.mode().contains(TermMode::APP_CURSOR)) {
-                (true, true) => b"\x1bOB",
-                (true, false) => b"\x1b[B",
-                (false, true) => b"\x1bOA",
-                (false, false) => b"\x1b[A",
-            };
-
-            let count = line_delta.unsigned_abs() as usize;
-            let mut bytes = Vec::with_capacity(seq.len() * count);
-            for _ in 0..count {
-                bytes.extend_from_slice(seq);
-            }
-            self.ctx.write_to_pty(bytes);
+        if cursor.line != point.line {
             return;
         }
 
-        // Same row: column movement.
+        // Column movement: characters between the cursor and the click,
+        // skipping the trailing half of wide characters (the shell moves the
+        // cursor per character, not per grid column).
         let cursor_col = cursor.column.0;
         let mut click_col = point.column.0;
         if click_col == cursor_col {

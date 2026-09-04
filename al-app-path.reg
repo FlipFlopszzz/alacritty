@@ -1,0 +1,8 @@
+Windows Registry Editor Version 5.00
+
+; Fork: register `al` for Win+R, pointing at the local fork build.
+; Import: double-click this file, or `reg import al-app-path.reg`
+; Remove: delete the key below (or `reg delete ... /f`)
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\al.exe]
+@="D:\\dev\\alacritty\\target\\release\\alacritty.exe"
