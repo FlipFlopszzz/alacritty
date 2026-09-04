@@ -73,12 +73,74 @@ impl Clipboard {
             _ => &mut self.clipboard,
         };
 
-        match clipboard.get_contents() {
+        let content = match clipboard.get_contents() {
             Err(err) => {
                 debug!("Unable to load text from clipboard: {err}");
                 String::new()
             },
             Ok(text) => text,
+        };
+
+        // Fork: Windows Terminal style — files on the clipboard paste as
+        // their path text (e.g. copied image files paste as `C:\a\b.png`).
+        #[cfg(windows)]
+        if content.is_empty() && ty == ClipboardType::Clipboard {
+            if let Some(paths) = load_hdrop_paths() {
+                return paths;
+            }
         }
+
+        content
+    }
+}
+
+/// Fork: read `CF_HDROP` from the clipboard and format every file as its
+/// path (quoted when it contains whitespace), matching the paste behavior of
+/// Windows Terminal.
+#[cfg(windows)]
+fn load_hdrop_paths() -> Option<String> {
+    use std::ptr;
+
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, OpenClipboard,
+    };
+    use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    const CF_HDROP: u32 = 15;
+
+    unsafe {
+        if OpenClipboard(ptr::null_mut()) == 0 {
+            return None;
+        }
+
+        let paths = (|| {
+            let hdrop: HDROP = GetClipboardData(CF_HDROP);
+            if hdrop.is_null() {
+                return None;
+            }
+
+            let count = DragQueryFileW(hdrop, u32::MAX, ptr::null_mut(), 0);
+            if count == 0 {
+                return None;
+            }
+
+            let mut quoted_paths = Vec::with_capacity(count as usize);
+            for index in 0..count {
+                let len = DragQueryFileW(hdrop, index, ptr::null_mut(), 0);
+                let mut buf = vec![0u16; len as usize + 1];
+                DragQueryFileW(hdrop, index, buf.as_mut_ptr(), len + 1);
+                let path = String::from_utf16_lossy(&buf[..len as usize]);
+                if path.contains(' ') {
+                    quoted_paths.push(format!("\"{path}\""));
+                } else {
+                    quoted_paths.push(path);
+                }
+            }
+
+            (!quoted_paths.is_empty()).then(|| quoted_paths.join(" "))
+        })();
+
+        CloseClipboard();
+        paths
     }
 }

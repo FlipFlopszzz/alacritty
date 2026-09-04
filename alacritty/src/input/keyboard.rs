@@ -8,7 +8,7 @@ use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 use winit::platform::macos::OptionAsAlt;
 
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::term::TermMode;
+use alacritty_terminal::term::{ClipboardType, TermMode};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use crate::config::{Action, BindingKey, BindingMode, KeyBinding};
@@ -229,12 +229,25 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         for i in 0..self.ctx.config().key_bindings().len() {
             let binding = &self.ctx.config().key_bindings()[i];
             if let Some(action) = binding_action(binding) {
-                // Fork: smart pass-through for `Copy`. Without a selection the
-                // key is released to the PTY, so `Ctrl+C` still sends `^C` to
-                // interrupt the running program (Windows Terminal behavior).
-                let bypass = action == Action::Copy
-                    && !mode.contains(BindingMode::VI)
-                    && self.ctx.selection_is_empty();
+                // Fork: smart pass-through for `Copy`/`Paste`.
+                //
+                // `Copy`: without a selection the key is released to the PTY,
+                // so `Ctrl+C` still sends `^C` to interrupt the running
+                // program (Windows Terminal behavior).
+                //
+                // `Paste`: with nothing pasteable on the clipboard (e.g. a raw
+                // bitmap from a screenshot) the key is a no-op, matching
+                // Windows Terminal. File listings are provided as path text by
+                // the clipboard layer.
+                let bypass = match action {
+                    Action::Copy => {
+                        !mode.contains(BindingMode::VI) && self.ctx.selection_is_empty()
+                    },
+                    Action::Paste => {
+                        self.ctx.clipboard_mut().load(ClipboardType::Clipboard).is_empty()
+                    },
+                    _ => false,
+                };
                 if bypass {
                     continue;
                 }
