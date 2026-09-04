@@ -1433,14 +1433,31 @@ impl Display {
             },
         };
         let bg_rect = self.scrollbar.bg_rect(self.size_info);
-        let scrollbar_rect = self.scrollbar.rect_from_bg_rect(bg_rect, self.size_info);
-        let y = self.size_info.height - (scrollbar_rect.y + scrollbar_rect.height) as f32;
+        let handle_rect = self.scrollbar.handle_rect(bg_rect, self.size_info);
+
+        // Fork: trough background behind the handle. In `Fading` mode it fades
+        // together with the handle; in `Always` mode it stays at 25%.
+        let trough_opacity = match config.mode {
+            ScrollbarMode::Always => 0.25 * config.opacity.as_f32(),
+            _ => 0.25 * opacity,
+        };
+        if trough_opacity > 0.01 {
+            rects.push(RenderRect::new(
+                bg_rect.x as f32,
+                bg_rect.y as f32,
+                bg_rect.width as f32,
+                bg_rect.height as f32,
+                config.color,
+                trough_opacity,
+            ));
+        }
+
         if opacity != 0. {
             rects.push(RenderRect::new(
-                scrollbar_rect.x as f32,
-                y,
-                scrollbar_rect.width as f32,
-                scrollbar_rect.height as f32,
+                handle_rect.x as f32,
+                handle_rect.y as f32,
+                handle_rect.width as f32,
+                handle_rect.height as f32,
                 config.color,
                 opacity,
             ));
@@ -1451,10 +1468,10 @@ impl Display {
         {
             self.damage_tracker.frame().add_viewport_rect(
                 &self.size_info,
-                scrollbar_rect.x,
-                y as i32,
-                scrollbar_rect.width,
-                scrollbar_rect.height,
+                bg_rect.x,
+                bg_rect.y,
+                bg_rect.width,
+                bg_rect.height,
             );
         }
     }

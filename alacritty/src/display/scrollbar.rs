@@ -18,6 +18,8 @@ pub struct Scrollbar {
     total_lines: usize,
     last_change: Option<Instant>,
     drag_state: Option<DragState>,
+    /// Fork: the mouse hovers the scrollbar trough.
+    hover: bool,
 }
 
 impl From<&ScrollbarConfig> for Scrollbar {
@@ -28,7 +30,20 @@ impl From<&ScrollbarConfig> for Scrollbar {
             total_lines: 0,
             last_change: None,
             drag_state: None,
+            hover: false,
         }
+    }
+}
+
+impl Scrollbar {
+    /// Fork: whether the mouse hovers the scrollbar.
+    pub fn set_hover(&mut self, hover: bool) {
+        self.hover = hover;
+    }
+
+    /// Fork: current hover state.
+    pub fn is_hovered(&self) -> bool {
+        self.hover
     }
 }
 
@@ -126,7 +141,15 @@ impl Scrollbar {
                     ScrollbarState::Invisible { has_damage: false }
                 }
             },
-            ScrollbarMode::Always => ScrollbarState::Show { opacity: self.config.opacity.as_f32() },
+            ScrollbarMode::Always => {
+                // Fork: full opacity while hovering or dragging the handle.
+                let opacity = if self.hover || self.drag_state.is_some() {
+                    1.0
+                } else {
+                    self.config.opacity.as_f32()
+                };
+                ScrollbarState::Show { opacity }
+            },
         }
     }
 
@@ -143,17 +166,19 @@ impl Scrollbar {
         }
     }
 
-    pub fn rect_from_bg_rect(&self, bg_rect: Rect, display_size: SizeInfo) -> Rect {
+    /// Fork: handle rectangle in top-based screen coordinates.
+    pub fn handle_rect(&self, bg_rect: Rect, display_size: SizeInfo) -> Rect {
         let height_fraction = display_size.screen_lines as f32 / self.total_lines as f32;
         let scrollbar_height =
             (height_fraction * bg_rect.height as f32).max(2. * display_size.cell_height);
 
+        // `display_offset` 0 (newest content) puts the handle at the BOTTOM.
         let y_progress = if self.total_lines <= display_size.screen_lines {
             0.0
         } else {
             self.display_offset as f32 / (self.total_lines - display_size.screen_lines) as f32
         };
-        let y = y_progress * (bg_rect.height as f32 - scrollbar_height) + bg_rect.y as f32;
+        let y = bg_rect.y as f32 + (1.0 - y_progress) * (bg_rect.height as f32 - scrollbar_height);
 
         Rect {
             x: bg_rect.x,
@@ -163,8 +188,9 @@ impl Scrollbar {
         }
     }
 
+    /// Fork: whether the mouse is over the scrollbar handle.
     pub fn contains_mouse_pos(
-        &mut self,
+        &self,
         display_size: SizeInfo,
         mouse_x: usize,
         mouse_y: usize,
@@ -174,16 +200,70 @@ impl Scrollbar {
         }
 
         let bg_rect = self.bg_rect(display_size);
-        // Fork: the whole trough (not just the handle) is interactive —
-        // clicking anywhere on it starts a drag from that position.
+        let handle = self.handle_rect(bg_rect, display_size);
         let mouse_x = mouse_x as f32;
-        let mouse_y = display_size.height - mouse_y as f32;
+        let mouse_y = mouse_y as f32;
+
+        if !(handle.x as f32..(handle.x + handle.width) as f32).contains(&mouse_x) {
+            return false;
+        }
+
+        (handle.y as f32..(handle.y + handle.height) as f32).contains(&mouse_y)
+    }
+
+    /// Fork: whether the mouse is anywhere over the scrollbar trough.
+    pub fn contains_track_pos(
+        &self,
+        display_size: SizeInfo,
+        mouse_x: usize,
+        mouse_y: usize,
+    ) -> bool {
+        if !self.is_visible(display_size) {
+            return false;
+        }
+
+        let bg_rect = self.bg_rect(display_size);
+        let mouse_x = mouse_x as f32;
+        let mouse_y = mouse_y as f32;
 
         if !(bg_rect.x as f32..(bg_rect.x + bg_rect.width) as f32).contains(&mouse_x) {
             return false;
         }
 
         (bg_rect.y as f32..(bg_rect.y + bg_rect.height) as f32).contains(&mouse_y)
+    }
+
+    /// Fork: clicking the trough jumps the view so that the clicked position
+    /// becomes the top of the viewport. Returns the scroll delta to apply.
+    pub fn click_jump(
+        &mut self,
+        display_size: SizeInfo,
+        mouse_x: usize,
+        mouse_y: usize,
+    ) -> Option<Scroll> {
+        if !self.contains_track_pos(display_size, mouse_x, mouse_y) {
+            return None;
+        }
+
+        let bg_rect = self.bg_rect(display_size);
+        // Fraction measured from the BOTTOM of the trough: display_offset 0
+        // means the viewport is at the bottom (newest content), so clicking
+        // the top of the trough jumps to the oldest lines.
+        let fraction =
+            (1.0 - (mouse_y as f32 - bg_rect.y as f32) / bg_rect.height as f32).clamp(0.0, 1.0);
+        let max_offset = (self.total_lines - display_size.screen_lines) as f32;
+        let target_offset = (fraction * max_offset).round() as usize;
+
+        let delta = target_offset as i32 - self.display_offset as i32;
+        if delta == 0 {
+            return None;
+        }
+        // Update the internal state immediately so hover/drag feedback matches
+        // the jump before the next redraw.
+        self.display_offset = target_offset;
+        self.last_change = Some(Instant::now());
+
+        Some(Scroll::Delta(delta))
     }
 
     pub fn try_start_drag(
@@ -197,7 +277,7 @@ impl Scrollbar {
         }
 
         let bg_rect = self.bg_rect(display_size);
-        let rect = self.rect_from_bg_rect(bg_rect, display_size);
+        let rect = self.handle_rect(bg_rect, display_size);
 
         if bg_rect.height == rect.height || self.total_lines <= display_size.screen_lines {
             self.drag_state =

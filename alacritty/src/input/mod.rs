@@ -646,9 +646,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     fn on_mouse_press(&mut self, button: MouseButton) {
         // Fork: take over left clicks on the scrollbar even inside
-        // mouse-reporting TUIs (e.g. Claude Code), so it stays draggable
-        // there. Checked before the hint takeover since the two regions are
-        // mutually exclusive (scrollbar vs text area).
+        // mouse-reporting TUIs (e.g. Claude Code): clicking the trough jumps
+        // the view, dragging the handle scrolls. Checked before the hint
+        // takeover since the two regions are mutually exclusive (scrollbar vs
+        // text area).
         if button == MouseButton::Left
             && !self.ctx.modifiers().state().shift_key()
             && self.ctx.mouse_mode()
@@ -656,8 +657,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let size_info = self.ctx.size_info();
             let mouse_x = self.ctx.mouse().x;
             let mouse_y = self.ctx.mouse().y;
-            if self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+            if self.ctx.display().scrollbar.contains_track_pos(size_info, mouse_x, mouse_y) {
+                if let Some(delta) =
+                    self.ctx.display().scrollbar.click_jump(size_info, mouse_x, mouse_y)
+                {
+                    self.ctx.scroll(delta);
+                }
+                // Allow fine-tuning by dragging right after the jump.
+                self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y);
                 self.ctx.mouse_mut().click_state = ClickState::None;
+                self.ctx.mark_dirty();
                 return;
             }
         }
@@ -687,17 +696,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // Handle mouse mode.
         if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
             self.ctx.mouse_mut().click_state = ClickState::None;
-
-            // Fork: take over left clicks on the scrollbar even inside
-            // mouse-reporting TUIs, so it can be dragged in Claude Code too.
-            if button == MouseButton::Left {
-                let size_info = self.ctx.size_info();
-                let mouse_x = self.ctx.mouse().x;
-                let mouse_y = self.ctx.mouse().y;
-                if self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
-                    return;
-                }
-            }
 
             let code = match button {
                 MouseButton::Left => 0,
@@ -742,12 +740,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Handle left click selection and vi mode cursor movement.
     fn on_left_click(&mut self, point: Point) {
-        // Fork: start scrollbar dragging when the click is on the scrollbar.
+        // Fork: scrollbar interaction — clicking the trough jumps the view to
+        // that position, and the drag right after the jump fine-tunes it.
         if self.ctx.config().scrollbar.mode != ScrollbarMode::Never {
             let size_info = self.ctx.size_info();
             let mouse_x = self.ctx.mouse().x;
             let mouse_y = self.ctx.mouse().y;
-            if self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+            if self.ctx.display().scrollbar.contains_track_pos(size_info, mouse_x, mouse_y) {
+                if let Some(delta) =
+                    self.ctx.display().scrollbar.click_jump(size_info, mouse_x, mouse_y)
+                {
+                    self.ctx.scroll(delta);
+                }
+                // Allow fine-tuning by dragging right after the jump.
+                self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y);
                 return;
             }
         }
@@ -867,6 +873,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // Mouse icon is different when not scrolling.
             let mouse_state = self.cursor_state();
             self.ctx.window().set_mouse_cursor(mouse_state);
+            // Fork: redraw so the handle highlight fades back immediately.
+            self.ctx.mark_dirty();
             if self.ctx.mouse_mode() {
                 return;
             }
@@ -1290,15 +1298,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Icon state of the cursor.
     fn cursor_state(&mut self) -> CursorIcon {
         // Fork: scrollbar dragging/hover takes priority. Keep the regular
-        // arrow cursor instead of a resize cursor.
+        // arrow cursor instead of a resize cursor, and track hover for the
+        // highlight color.
         if self.ctx.config().scrollbar.mode != ScrollbarMode::Never {
-            if self.ctx.display().scrollbar.is_dragging() {
-                return CursorIcon::Default;
-            }
             let display_size = self.ctx.size_info();
             let mouse_x = self.ctx.mouse().x;
             let mouse_y = self.ctx.mouse().y;
-            if self.ctx.display().scrollbar.contains_mouse_pos(display_size, mouse_x, mouse_y) {
+            let hovering =
+                self.ctx.display().scrollbar.contains_mouse_pos(display_size, mouse_x, mouse_y);
+            // Fork: redraw immediately when the hover highlight changes,
+            // otherwise the color update waits for unrelated damage.
+            if self.ctx.display().scrollbar.is_hovered() != hovering {
+                self.ctx.display().scrollbar.set_hover(hovering);
+                self.ctx.mark_dirty();
+            }
+            if self.ctx.display().scrollbar.is_dragging() || hovering {
                 return CursorIcon::Default;
             }
         }
