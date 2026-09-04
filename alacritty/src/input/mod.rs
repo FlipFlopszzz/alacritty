@@ -471,7 +471,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let lmb_pressed = self.ctx.mouse().left_button_state == ElementState::Pressed;
         let rmb_pressed = self.ctx.mouse().right_button_state == ElementState::Pressed;
-        if !self.ctx.selection_is_empty() && (lmb_pressed || rmb_pressed) {
+        // Fork: presses on the scrollbar (trough click-jump or handle drag)
+        // never touch the text selection.
+        let scrollbar_interactive = self.ctx.config().scrollbar.mode != ScrollbarMode::Never
+            && (self.ctx.mouse().scrollbar_press || self.ctx.display().scrollbar.is_dragging());
+        if !scrollbar_interactive && !self.ctx.selection_is_empty() && (lmb_pressed || rmb_pressed)
+        {
             self.update_selection_scrolling(y);
         }
 
@@ -500,9 +505,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let cell_changed = old_point != point;
 
         // If the mouse hasn't changed cells, do nothing.
+        //
+        // Fork: never skip updates over the scrollbar trough. Its column sits
+        // outside the narrowed grid, so the cell position is clamped to the
+        // last column and cell-change detection goes blind there — moving in
+        // along the window edge used to skip the cursor/hover update entirely,
+        // leaving the text cursor and no highlight until a cell boundary was
+        // crossed again.
+        let over_scrollbar = self.ctx.config().scrollbar.mode != ScrollbarMode::Never
+            && self.ctx.display().scrollbar.contains_track_pos(size_info, x, y);
         if !cell_changed
             && self.ctx.mouse().cell_side == cell_side
             && self.ctx.mouse().inside_text_area == inside_text_area
+            && !over_scrollbar
         {
             return;
         }
@@ -520,17 +535,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // Don't launch URLs if mouse has moved.
         self.ctx.mouse_mut().block_hint_launcher = true;
 
-        // Fork: while dragging the scrollbar, suppress text selection and
-        // mouse reporting — the drag only scrolls.
-        let scrollbar_dragging = self.ctx.config().scrollbar.mode != ScrollbarMode::Never
-            && self.ctx.display().scrollbar.is_dragging();
-
-        if !scrollbar_dragging
+        // Fork: while the press belongs to the scrollbar, suppress text
+        // selection and mouse reporting — the interaction only scrolls.
+        if !scrollbar_interactive
             && (lmb_pressed || rmb_pressed)
             && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
         {
             self.ctx.update_selection(point, cell_side);
-        } else if !scrollbar_dragging
+        } else if !scrollbar_interactive
             && cell_changed
             && self.ctx.terminal().mode().intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG)
         {
@@ -645,6 +657,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_press(&mut self, button: MouseButton) {
+        // Fork: this press is only owned by the scrollbar if it hits the
+        // trough below; any other press behaves like a normal one.
+        self.ctx.mouse_mut().scrollbar_press = false;
+
         // Fork: take over left clicks on the scrollbar even inside
         // mouse-reporting TUIs (e.g. Claude Code): clicking the trough jumps
         // the view, dragging the handle scrolls. Checked before the hint
@@ -658,13 +674,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let mouse_x = self.ctx.mouse().x;
             let mouse_y = self.ctx.mouse().y;
             if self.ctx.display().scrollbar.contains_track_pos(size_info, mouse_x, mouse_y) {
-                if let Some(delta) =
-                    self.ctx.display().scrollbar.click_jump(size_info, mouse_x, mouse_y)
-                {
-                    self.ctx.scroll(delta);
+                // Fork: own the press *before* any scrolling happens —
+                // `scroll()` suppresses its selection endpoint update based on
+                // this flag, so setting it after the jump is too late.
+                self.ctx.mouse_mut().scrollbar_press = true;
+                // Clicking the handle starts a drag without jumping; clicking
+                // the empty trough jumps the view to that position.
+                if !self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+                    if let Some(delta) =
+                        self.ctx.display().scrollbar.click_jump(size_info, mouse_x, mouse_y)
+                    {
+                        self.ctx.scroll(delta);
+                    }
                 }
-                // Allow fine-tuning by dragging right after the jump.
-                self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y);
                 self.ctx.mouse_mut().click_state = ClickState::None;
                 self.ctx.mark_dirty();
                 return;
@@ -747,13 +769,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let mouse_x = self.ctx.mouse().x;
             let mouse_y = self.ctx.mouse().y;
             if self.ctx.display().scrollbar.contains_track_pos(size_info, mouse_x, mouse_y) {
-                if let Some(delta) =
-                    self.ctx.display().scrollbar.click_jump(size_info, mouse_x, mouse_y)
-                {
-                    self.ctx.scroll(delta);
+                // Fork: own the press *before* any scrolling happens —
+                // `scroll()` suppresses its selection endpoint update based on
+                // this flag, so setting it after the jump is too late.
+                self.ctx.mouse_mut().scrollbar_press = true;
+                // Clicking the handle starts a drag without jumping; clicking
+                // the empty trough jumps the view to that position.
+                if !self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+                    if let Some(delta) =
+                        self.ctx.display().scrollbar.click_jump(size_info, mouse_x, mouse_y)
+                    {
+                        self.ctx.scroll(delta);
+                    }
                 }
-                // Allow fine-tuning by dragging right after the jump.
-                self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y);
                 return;
             }
         }
@@ -863,6 +891,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {
+        // Fork: the press is over, wherever it landed.
+        self.ctx.mouse_mut().scrollbar_press = false;
+
         // Fork: stop scrollbar dragging when the drag was on the scrollbar.
         // Under mouse reporting the release is not reported either — it
         // belongs to the scrollbar drag, not to the application.

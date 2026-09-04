@@ -1432,6 +1432,12 @@ impl Display {
                 0.
             },
         };
+        // Fork: the trough/handle opacity reflects the hover highlight, so any
+        // opacity change must damage the scrollbar area — without it the
+        // partial redraw never presents the new pixels, and the highlight
+        // only appears when unrelated content scrolls.
+        let opacity_changed = self.scrollbar.take_opacity_change(opacity);
+
         let bg_rect = self.scrollbar.bg_rect(self.size_info);
         let handle_rect = self.scrollbar.handle_rect(bg_rect, self.size_info);
 
@@ -1463,9 +1469,7 @@ impl Display {
             ));
         }
 
-        if did_position_change
-            || (config.mode == ScrollbarMode::Fading && opacity < config.opacity.as_f32())
-        {
+        if did_position_change || opacity_changed {
             self.damage_tracker.frame().add_viewport_rect(
                 &self.size_info,
                 bg_rect.x,

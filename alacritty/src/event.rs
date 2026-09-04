@@ -720,10 +720,18 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         let vi_mode = self.terminal.mode().contains(TermMode::VI);
 
         // Update selection.
+        //
+        // Fork: scrolling triggered by the scrollbar (trough click-jump or
+        // handle drag) belongs to the scrollbar — `click_jump` runs while the
+        // left button is already pressed, and without this guard the selection
+        // endpoint would jump to the scrollbar position across the whole
+        // scrolled range.
+        let scrollbar_owned = self.display.scrollbar.is_dragging() || self.mouse.scrollbar_press;
         if vi_mode && self.terminal.selection.as_ref().is_some_and(|s| !s.is_empty()) {
             self.update_selection(self.terminal.vi_mode_cursor.point, Side::Right);
-        } else if self.mouse.left_button_state == ElementState::Pressed
-            || self.mouse.right_button_state == ElementState::Pressed
+        } else if !scrollbar_owned
+            && (self.mouse.left_button_state == ElementState::Pressed
+                || self.mouse.right_button_state == ElementState::Pressed)
         {
             let display_offset = self.terminal.grid().display_offset();
             let point = self.mouse.point(&self.size_info(), display_offset);
@@ -1777,6 +1785,9 @@ pub struct Mouse {
     pub block_hint_launcher: bool,
     pub hint_highlight_dirty: bool,
     pub inside_text_area: bool,
+    /// Fork: the current press started on the scrollbar trough, so motion
+    /// until the release belongs to the scrollbar, never to text selection.
+    pub scrollbar_press: bool,
     pub x: usize,
     pub y: usize,
 }
@@ -1794,6 +1805,7 @@ impl Default for Mouse {
             hint_highlight_dirty: Default::default(),
             block_hint_launcher: Default::default(),
             inside_text_area: Default::default(),
+            scrollbar_press: false,
             accumulated_scroll: Default::default(),
             x: Default::default(),
             y: Default::default(),

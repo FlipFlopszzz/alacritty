@@ -20,6 +20,9 @@ pub struct Scrollbar {
     drag_state: Option<DragState>,
     /// Fork: the mouse hovers the scrollbar trough.
     hover: bool,
+    /// Fork: opacity as of the last frame, so hover-highlight changes can be
+    /// damaged — otherwise the new pixels never reach the screen.
+    last_drawn_opacity: Option<f32>,
 }
 
 impl From<&ScrollbarConfig> for Scrollbar {
@@ -31,6 +34,7 @@ impl From<&ScrollbarConfig> for Scrollbar {
             last_change: None,
             drag_state: None,
             hover: false,
+            last_drawn_opacity: None,
         }
     }
 }
@@ -44,6 +48,14 @@ impl Scrollbar {
     /// Fork: current hover state.
     pub fn is_hovered(&self) -> bool {
         self.hover
+    }
+
+    /// Fork: record the opacity drawn this frame and report whether it
+    /// changed since the previous one.
+    pub fn take_opacity_change(&mut self, opacity: f32) -> bool {
+        let changed = self.last_drawn_opacity != Some(opacity);
+        self.last_drawn_opacity = Some(opacity);
+        changed
     }
 }
 
