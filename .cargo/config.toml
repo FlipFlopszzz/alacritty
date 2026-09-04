@@ -1,0 +1,4 @@
+# Fork: optimize for THIS machine's CPU (AVX2 etc.). The resulting binary is
+# not portable to older CPUs — remove this file to build a distributable one.
+[build]
+rustflags = ["-C", "target-cpu=native"]

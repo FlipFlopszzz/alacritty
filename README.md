@@ -4,6 +4,28 @@
 
 <h1 align="center">Alacritty - A fast, cross-platform, OpenGL terminal emulator</h1>
 
+> [!NOTE]
+> ## Fork enhancements (branch `fork/win-enhancements`)
+>
+> Personal Windows-focused fork of upstream Alacritty (Chinese notes included,
+> see `alacritty.toml` / `al-app-path.reg` / `windows/dist.ps1`).
+>
+> - **Smart `Ctrl+C`** — copies with a selection, sends `^C` without one
+>   (Windows Terminal behavior); suppressed presses no longer leak kitty
+>   release events
+> - **Smart `Ctrl+V`** — pastes text; files on the clipboard paste as path
+>   text (CF_HDROP, Windows Terminal behavior); raw bitmaps are a no-op
+> - **Click to move the shell cursor** on the cursor's row, wide-char aware
+> - **Ctrl+click OSC 8 links inside mouse-reporting TUIs** (e.g. Claude Code),
+>   with hover underline in mouse mode
+> - **`mouse.double_click_interval`** config option (defaults to the system
+>   double click time on Windows)
+> - **System32 CWD fallback** for GUI launches without a Start-in directory
+>
+> Build: `cargo build --profile dist`, then install with
+> `powershell -File windows\dist.ps1` (overwrites `C:\Program Files\Alacritty`).
+> `al-app-path.reg` registers the `al` Win+R alias.
+
 <p align="center">
   <img alt="Alacritty - A fast, cross-platform, OpenGL terminal emulator"
        src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/promo/alacritty-readme.png">

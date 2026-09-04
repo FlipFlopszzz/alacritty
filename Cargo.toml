@@ -16,6 +16,18 @@ lto = "thin"
 debug = 1
 incremental = false
 
+# Fork: distribution profile for the final optimized binary — full LTO,
+# single codegen unit, stripped symbols. Builds to `target/dist/`.
+#   dev iteration:  cargo build --release
+#   final binary:   cargo build --profile dist   (or .\windows\dist.ps1)
+# `.cargo/config.toml` adds `-C target-cpu=native` to every build, so the
+# binary only runs on machines with the same CPU feature level.
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 toml = "0.9.11"
 toml_edit = "0.24.0"
