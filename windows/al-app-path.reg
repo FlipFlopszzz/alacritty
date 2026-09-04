@@ -1,7 +1,7 @@
 Windows Registry Editor Version 5.00
 
-; Fork: register `al` for Win+R, pointing at the official install location
-; that windows\dist.ps1 keeps updated with the fork build.
+; Fork: register `al` for Win+R, pointing at the fork install location
+; (windows\dist.ps1 copies the fork build here).
 ; Import: double-click this file, or `reg import al-app-path.reg`
 ; Remove: import al-remove.reg
 

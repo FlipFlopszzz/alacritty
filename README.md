@@ -8,7 +8,7 @@
 > ## Fork enhancements (branch `fork/win-enhancements`)
 >
 > Personal Windows-focused fork of upstream Alacritty (Chinese notes included,
-> see `alacritty.toml` / `al-app-path.reg` / `windows/dist.ps1`).
+> see `alacritty.toml` / `windows\al-app-path.reg` / `windows\dist.ps1`).
 >
 > - **Smart `Ctrl+C`** — copies with a selection, sends `^C` without one
 >   (Windows Terminal behavior); suppressed presses no longer leak kitty
@@ -22,9 +22,24 @@
 >   double click time on Windows)
 > - **System32 CWD fallback** for GUI launches without a Start-in directory
 >
-> Build: `cargo build --profile dist`, then install with
-> `powershell -File windows\dist.ps1` (overwrites `C:\Program Files\Alacritty`).
-> `al-app-path.reg` registers the `al` Win+R alias.
+> Build & release (Windows):
+> - dev iteration: `cargo build --release` → `target\release\alacritty.exe`
+>   (thin LTO + debug line numbers, fast incremental builds)
+> - release: `powershell -File windows\dist.ps1` — builds the `dist` profile
+>   (full LTO + `target-cpu=native`, stripped) and copies it over
+>   `C:\Program Files\Alacritty\alacritty.exe` (first run shows one UAC
+>   prompt to grant write access to that folder)
+> - `windows\al-app-path.reg` registers the `al` Win+R alias pointing there
+>   (`windows\al-remove.reg` removes it)
+>
+> [!WARNING]
+> **Tightly coupled to Windows.** Every enhancement targets Windows only:
+> clipboard file-paste (CF_HDROP), the click-to-move arrow sequences, the
+> System32 CWD fallback (`GetDoubleClickTime`, registry files) and the
+> release script are all Windows-specific, and the shipped config assumes
+> PowerShell 7 + ConPTY. The cross-platform code stays `cfg`-gated so
+> Linux/macOS builds still compile, but nothing here is tested or intended
+> for them.
 
 <p align="center">
   <img alt="Alacritty - A fast, cross-platform, OpenGL terminal emulator"

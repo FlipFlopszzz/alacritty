@@ -1,31 +1,27 @@
-# Fork release builder: optimized dist binary + MSI installer.
+# Fork release flow: copy the optimized dist-profile binary to the official
+# Alacritty install location (C:\Program Files\Alacritty). No MSI involved.
 #
 #   powershell -File windows\dist.ps1
 #
-# Produces:
-#   target\dist\alacritty.exe        optimized binary
-#   Alacritty-dist-installer.msi     installer (repo root)
-#
-# Install: run the MSI manually — it upgrades in place over
-# C:\Program Files\Alacritty and refreshes the Start menu entry.
-#
-# Requires WiX (one-time setup):
-#   dotnet tool install --global wix --version 4.0.5
-#   wix extension add -g WixToolset.UI.wixext/4.0.5
-#   wix extension add -g WixToolset.Util.wixext/4.0.5
+# First run may show one UAC prompt: it creates the install dir and grants
+# this user modify rights, so later runs need no elevation.
 
 $ErrorActionPreference = 'Stop'
 $repo = 'D:\dev\alacritty'
-$wix = Join-Path $env:USERPROFILE '.dotnet\tools\wix.exe'
+$installDir = 'C:\Program Files\Alacritty'
+$dst = Join-Path $installDir 'alacritty.exe'
 Set-Location $repo
 
 cargo build --profile dist
 if ($LASTEXITCODE -ne 0) { throw 'cargo build --profile dist failed' }
 
-& $wix build -arch 'x64' `
-    -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
-    -out 'Alacritty-dist-installer.msi' `
-    'alacritty\windows\wix\alacritty.wxs'
-if ($LASTEXITCODE -ne 0) { throw 'wix build failed' }
+if (-not (Test-Path $installDir)) {
+    Write-Output 'Install dir missing, elevating once to create it and grant write access...'
+    Start-Process -FilePath 'powershell' -Verb RunAs -Wait -ArgumentList `
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $repo 'windows\grant-install-dir.ps1')
+}
 
-Write-Output "MSI: $repo\Alacritty-dist-installer.msi"
+Copy-Item (Join-Path $repo 'target\dist\alacritty.exe') $dst -Force
+
+& $dst -V
+Write-Output "installed: $dst"
