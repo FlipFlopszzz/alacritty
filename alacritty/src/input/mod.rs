@@ -37,6 +37,7 @@ use alacritty_terminal::vi_mode::ViMotion;
 use alacritty_terminal::vte::ansi::{ClearMode, Handler};
 
 use crate::clipboard::Clipboard;
+use crate::config::ui_config::ScrollbarMode;
 #[cfg(target_os = "macos")]
 use crate::config::window::Decorations;
 use crate::config::{
@@ -479,6 +480,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let x = x.clamp(0, size_info.width() as i32 - 1) as usize;
         let y = y.clamp(0, size_info.height() as i32 - 1) as usize;
+
+        // Fork: feed dragging deltas to the scrollbar.
+        if self.ctx.config().scrollbar.mode != ScrollbarMode::Never {
+            let mouse_y_delta = y as f32 - self.ctx.mouse().y as f32;
+            if let Some(drag_event) = self.ctx.display().scrollbar.apply_mouse_delta(mouse_y_delta)
+            {
+                self.ctx.scroll(drag_event);
+            }
+        }
+
         self.ctx.mouse_mut().x = x;
         self.ctx.mouse_mut().y = y;
 
@@ -696,6 +707,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Handle left click selection and vi mode cursor movement.
     fn on_left_click(&mut self, point: Point) {
+        // Fork: start scrollbar dragging when the click is on the scrollbar.
+        if self.ctx.config().scrollbar.mode != ScrollbarMode::Never {
+            let size_info = self.ctx.size_info();
+            let mouse_x = self.ctx.mouse().x;
+            let mouse_y = self.ctx.mouse().y;
+            if self.ctx.display().scrollbar.try_start_drag(size_info, mouse_x, mouse_y) {
+                return;
+            }
+        }
+
         let side = self.ctx.mouse().cell_side;
         let control = self.ctx.modifiers().state().control_key();
 
@@ -801,6 +822,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {
+        // Fork: stop scrollbar dragging when the drag was on the scrollbar.
+        if self.ctx.config().scrollbar.mode != ScrollbarMode::Never
+            && self.ctx.display().scrollbar.is_dragging()
+        {
+            self.ctx.display().scrollbar.stop_dragging();
+            // Mouse icon is different when not scrolling.
+            let mouse_state = self.cursor_state();
+            self.ctx.window().set_mouse_cursor(mouse_state);
+        }
+
         // Fork: mirror of the press takeover — don't report the release of a
         // click that was taken over (and don't trigger the hint again; the
         // press already did). If the modifiers were released before the button
@@ -1218,6 +1249,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Icon state of the cursor.
     fn cursor_state(&mut self) -> CursorIcon {
+        // Fork: scrollbar dragging/hover takes priority.
+        if self.ctx.config().scrollbar.mode != ScrollbarMode::Never {
+            if self.ctx.display().scrollbar.is_dragging() {
+                return CursorIcon::RowResize;
+            }
+            let display_size = self.ctx.size_info();
+            let mouse_x = self.ctx.mouse().x;
+            let mouse_y = self.ctx.mouse().y;
+            if self.ctx.display().scrollbar.contains_mouse_pos(display_size, mouse_x, mouse_y) {
+                return CursorIcon::Default;
+            }
+        }
+
         let display_offset = self.ctx.terminal().grid().display_offset();
         let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
         let hyperlink = self.ctx.terminal().grid()[point].hyperlink();

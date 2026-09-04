@@ -29,6 +29,8 @@ pub enum Topic {
     BlinkCursor,
     BlinkTimeout,
     Frame,
+    /// Fork: fading scrollbar redraw.
+    ScrollbarRedraw,
 }
 
 /// Event scheduled to be emitted at a specific time.

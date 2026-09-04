@@ -34,10 +34,10 @@ family = "SauceCodePro Nerd Font"
 style = "Regular"
 
 # ------------------------------------------------------------
-#  光标 — WT 默认竖线（Alacritty 中叫 Beam）；你开了 disableAnimations，故不闪烁
+#  光标 — WT 默认竖线（Alacritty 中叫 Beam）+ 闪烁动画
 # ------------------------------------------------------------
 [cursor]
-style = { shape = "Beam", blinking = "Off" }
+style = { shape = "Beam", blinking = "On" }
 # 失焦时光标保持原样式，不变空心方框
 unfocused_hollow = false
 
@@ -137,3 +137,13 @@ command = { program = "cmd", args = ["/c", "start", ""] }
 [mouse]
 # 双击判定间隔（毫秒），按你的点击节奏调小可避免误触选词
 double_click_interval = 400
+
+# ------------------------------------------------------------
+#  滚动条（fork 新增功能，Alacritty 官方没有）
+#  mode: Never / Fading（滚动时浮现，duration 毫秒后淡出）/ Always（常驻，占一列宽）
+# ------------------------------------------------------------
+[scrollbar]
+mode = "Always"
+color = "#7f7f7f"
+opacity = 0.5
+duration = 2000

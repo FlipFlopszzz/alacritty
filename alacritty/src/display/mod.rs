@@ -39,6 +39,7 @@ use alacritty_terminal::vte::ansi::{CursorShape, NamedColor};
 use crate::config::UiConfig;
 use crate::config::debug::RendererPreference;
 use crate::config::font::Font;
+use crate::config::ui_config::{Scrollbar as ScrollbarConfig, ScrollbarMode};
 use crate::config::window::Dimensions;
 #[cfg(not(windows))]
 use crate::config::window::StartupMode;
@@ -49,6 +50,7 @@ use crate::display::cursor::IntoRects;
 use crate::display::damage::{DamageTracker, damage_y_to_viewport_y};
 use crate::display::hint::{HintMatch, HintState};
 use crate::display::meter::Meter;
+use crate::display::scrollbar::Scrollbar;
 use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
@@ -66,6 +68,7 @@ pub mod window;
 mod bell;
 mod damage;
 mod meter;
+mod scrollbar;
 
 /// Label for the forward terminal search bar.
 const FORWARD_SEARCH_LABEL: &str = "Search: ";
@@ -361,6 +364,9 @@ pub struct Display {
 
     pub visual_bell: VisualBell,
 
+    /// Fork: on-screen scrollbar state.
+    pub scrollbar: Scrollbar,
+
     /// Mapped RGB values for each terminal color.
     pub colors: List,
 
@@ -448,7 +454,7 @@ impl Display {
         let viewport_size = window.inner_size();
 
         // Create new size with at least one column and row.
-        let size_info = SizeInfo::new(
+        let mut size_info = SizeInfo::new(
             viewport_size.width as f32,
             viewport_size.height as f32,
             cell_width,
@@ -457,6 +463,11 @@ impl Display {
             padding.1,
             config.window.dynamic_padding && config.window.dimensions().is_none(),
         );
+
+        // Fork: reserve space for the always-visible scrollbar.
+        if config.scrollbar.mode == ScrollbarMode::Always && size_info.columns > 1 {
+            size_info.columns -= 1;
+        }
 
         info!("Cell size: {cell_width} x {cell_height}");
         info!("Padding: {} x {}", size_info.padding_x(), size_info.padding_y());
@@ -517,6 +528,7 @@ impl Display {
         Ok(Self {
             context: ManuallyDrop::new(context),
             visual_bell: VisualBell::from(&config.bell),
+            scrollbar: Scrollbar::from(&config.scrollbar),
             renderer: ManuallyDrop::new(renderer),
             renderer_preference: config.debug.renderer,
             surface: ManuallyDrop::new(surface),
@@ -698,6 +710,11 @@ impl Display {
             padding.1,
             config.window.dynamic_padding,
         );
+
+        // Fork: reserve space for the always-visible scrollbar.
+        if config.scrollbar.mode == ScrollbarMode::Always && new_size.columns > 1 {
+            new_size.columns -= 1;
+        }
 
         // Update number of column/lines in the viewport.
         let search_active = search_state.history_index.is_some();
@@ -892,6 +909,17 @@ impl Display {
             self.draw_line_indicator(config, total_lines, None, display_offset);
         };
 
+        // Fork: draw the scrollbar.
+        if config.scrollbar.mode != ScrollbarMode::Never {
+            self.draw_scrollbar(
+                &mut rects,
+                scheduler,
+                display_offset,
+                total_lines,
+                &config.scrollbar,
+            );
+        }
+
         // Draw cursor.
         rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
 
@@ -1050,6 +1078,7 @@ impl Display {
     pub fn update_config(&mut self, config: &UiConfig) {
         self.damage_tracker.debug = config.debug.highlight_damage;
         self.visual_bell.update_config(&config.bell);
+        self.scrollbar.update_config(&config.scrollbar);
         self.colors = List::from(&config.colors);
     }
 
@@ -1374,6 +1403,70 @@ impl Display {
             let glyph_cache = &mut self.glyph_cache;
             self.renderer.draw_string(point, fg, bg, text.chars(), &self.size_info, glyph_cache);
         }
+    }
+
+    /// Fork: draw the scrollbar (background trough + position handle).
+    fn draw_scrollbar(
+        &mut self,
+        rects: &mut Vec<RenderRect>,
+        scheduler: &mut Scheduler,
+        display_offset: usize,
+        total_lines: usize,
+        config: &ScrollbarConfig,
+    ) {
+        let did_position_change = self.scrollbar.update(display_offset, total_lines);
+        let opacity = match self.scrollbar.intensity(self.size_info) {
+            scrollbar::ScrollbarState::Show { opacity } => opacity,
+            scrollbar::ScrollbarState::WaitForFading { opacity, remaining_duration } => {
+                self.request_scrollbar_redraw(scheduler, remaining_duration);
+                opacity
+            },
+            scrollbar::ScrollbarState::Fading { opacity } => {
+                self.window.request_redraw();
+                opacity
+            },
+            scrollbar::ScrollbarState::Invisible { has_damage } => {
+                if !has_damage {
+                    return;
+                }
+                0.
+            },
+        };
+        let bg_rect = self.scrollbar.bg_rect(self.size_info);
+        let scrollbar_rect = self.scrollbar.rect_from_bg_rect(bg_rect, self.size_info);
+        let y = self.size_info.height - (scrollbar_rect.y + scrollbar_rect.height) as f32;
+        if opacity != 0. {
+            rects.push(RenderRect::new(
+                scrollbar_rect.x as f32,
+                y,
+                scrollbar_rect.width as f32,
+                scrollbar_rect.height as f32,
+                config.color,
+                opacity,
+            ));
+        }
+
+        if did_position_change
+            || (config.mode == ScrollbarMode::Fading && opacity < config.opacity.as_f32())
+        {
+            self.damage_tracker.frame().add_viewport_rect(
+                &self.size_info,
+                scrollbar_rect.x,
+                y as i32,
+                scrollbar_rect.width,
+                scrollbar_rect.height,
+            );
+        }
+    }
+
+    /// Fork: schedule a scrollbar redraw after the fading wait period.
+    fn request_scrollbar_redraw(&mut self, scheduler: &mut Scheduler, wait_timeout: Duration) {
+        let window_id = self.window.id();
+        let timer_id = TimerId::new(Topic::ScrollbarRedraw, window_id);
+        let event = Event::new(EventType::Frame, window_id);
+
+        scheduler.unschedule(timer_id);
+        scheduler.schedule(event, wait_timeout, false, timer_id);
     }
 
     /// Highlight damaged rects.
