@@ -1,0 +1,139 @@
+# Alacritty 配置 — 迁移自 Windows Terminal settings.json (2026-09)
+# 保存后自动生效（live_config_reload），无需重启
+
+[general]
+live_config_reload = true
+
+# ------------------------------------------------------------
+#  Shell — PowerShell 7（同 WT 默认 profile "pwsh.exe -NoLogo"）
+# ------------------------------------------------------------
+[terminal]
+shell = { program = "pwsh.exe", args = ["-NoLogo"] }
+
+# ------------------------------------------------------------
+#  窗口 — 同 WT defaults：padding 8、透明度 70%、120x30
+# ------------------------------------------------------------
+[window]
+padding = { x = 8, y = 8 }
+dynamic_padding = true
+opacity = 0.93
+dimensions = { columns = 120, lines = 30 }
+# 注：WT 的 useAcrylic(亚克力模糊) Alacritty 在 Windows 上不支持，无法迁移
+
+[scrolling]
+history = 10000
+
+# ------------------------------------------------------------
+#  字体 — SauceCodePro Nerd Font 14（同 WT）
+# ------------------------------------------------------------
+[font]
+size = 14.0
+
+[font.normal]
+family = "SauceCodePro Nerd Font"
+style = "Regular"
+
+# ------------------------------------------------------------
+#  光标 — WT 默认竖线（Alacritty 中叫 Beam）；你开了 disableAnimations，故不闪烁
+# ------------------------------------------------------------
+[cursor]
+style = { shape = "Beam", blinking = "Off" }
+# 失焦时光标保持原样式，不变空心方框
+unfocused_hollow = false
+
+# 选中即复制到剪贴板——省掉复制键，鼠标划选即可
+[selection]
+save_to_clipboard = true
+
+# ------------------------------------------------------------
+#  配色 — One Half Dark (modified)，与 WT scheme 逐项对应
+# ------------------------------------------------------------
+[colors.primary]
+background = "#282C34"
+foreground = "#DCDFE4"
+
+[colors.cursor]
+cursor = "#FFFFFF"
+
+[colors.selection]
+background = "#404859"
+foreground = "#DCDFE4"
+
+[colors.normal]
+black   = "#23272E"
+red     = "#E06C75"
+green   = "#98C379"
+yellow  = "#E5C07B"
+blue    = "#61AFEF"
+magenta = "#C678DD"
+cyan    = "#56B6C2"
+white   = "#DCDFE4"
+
+[colors.bright]
+black   = "#5A6374"
+red     = "#E06C75"
+green   = "#98C379"
+yellow  = "#E5C07B"
+blue    = "#61AFEF"
+magenta = "#C678DD"
+cyan    = "#56B6C2"
+white   = "#DCDFE4"
+
+# ------------------------------------------------------------
+#  快捷键
+#  注意：Ctrl+C/Ctrl+V 故意不绑定——Alacritty 的 Copy/Paste 绑定会
+#  无条件吞掉按键（不像 WT 那样"无选区时放行"），导致 ^C 无法中断
+#  命令、CC 收不到 Ctrl+C/Ctrl+V（退出/贴图失效）。
+#  终端级复制粘贴走 Alacritty 默认键：
+#    Ctrl+Shift+C 复制选中文本，Ctrl+Shift+V 粘贴
+# ------------------------------------------------------------
+[[keyboard.bindings]]
+# shift+enter 发送 ESC+CR —— Claude Code 官方 /terminal-setup 写入的方案
+key = "Return"
+mods = "Shift"
+chars = "\u001B\r"
+
+[[keyboard.bindings]]
+# ctrl+c → Copy：配合 fork 的智能放行——有选区复制，无选区放行 ^C 中断
+# （Alacritty 默认没有 Ctrl+C 绑定，此绑定是智能行为的前提）
+key = "C"
+mods = "Control"
+action = "Copy"
+
+[[keyboard.bindings]]
+# ctrl+v 官方 Paste：pwsh 里粘贴文本（bracketed paste）；剪贴板是图片时
+# 空粘贴事件会让 CC 自己读剪贴板贴图（与 WT 的 Ctrl+V 行为一致）
+key = "V"
+mods = "Control"
+action = "Paste"
+
+[[keyboard.bindings]]
+# ctrl+shift+n 开新窗口（同 WT 快捷键）
+key = "N"
+mods = "Control|Shift"
+action = "CreateNewWindow"
+
+[[keyboard.bindings]]
+# ctrl+f 搜索（WT 是搜索条，Alacritty 是交互式高亮搜索）
+key = "F"
+mods = "Control"
+action = "SearchForward"
+
+# ------------------------------------------------------------
+#  OSC 8 超链接 / URL
+#  普通 shell 里：Ctrl+点击打开
+#  CC 等 TUI 捕获鼠标时：Ctrl+Shift+点击（Shift 用于抑制鼠标上报，
+#  官方设计如此，见 alacritty#8129）
+# ------------------------------------------------------------
+[[hints.enabled]]
+regex = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)[^\u0000-\u001F\u007F-\u009F<>\"\\s{-}\\^⟨⟩`\\\\]+"
+hyperlinks = true
+post_processing = true
+persist = false
+mouse = { enabled = true, mods = "Control" }
+binding = { key = "O", mods = "Control|Shift" }
+command = { program = "cmd", args = ["/c", "start", ""] }
+
+[mouse]
+# 双击判定间隔（毫秒），按你的点击节奏调小可避免误触选词
+double_click_interval = 400

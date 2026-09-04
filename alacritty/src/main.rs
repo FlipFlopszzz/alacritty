@@ -166,6 +166,23 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
     // Update the log level from config.
     log::set_max_level(config.debug.log_level);
 
+    // Fork: GUI launches without a "Start in" directory (Start menu search,
+    // shell:URIs, ...) inherit System32 as the working directory. Fall back to
+    // the home directory so the shell starts there instead, while regular
+    // launches (explorer address bar, Win+R) keep their inherited directory.
+    #[cfg(windows)]
+    {
+        let windows_dir =
+            env::var("SystemRoot").map_or_else(|_| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        if let Ok(cwd) = env::current_dir() {
+            if cwd.starts_with(&windows_dir) {
+                if let Some(home) = home::home_dir() {
+                    let _ = env::set_current_dir(home);
+                }
+            }
+        }
+    }
+
     // Set tty environment variables.
     tty::setup_env();
 
