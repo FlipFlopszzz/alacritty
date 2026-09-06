@@ -1788,6 +1788,9 @@ pub struct Mouse {
     /// Fork: the current press started on the scrollbar trough, so motion
     /// until the release belongs to the scrollbar, never to text selection.
     pub scrollbar_press: bool,
+    /// Fork: deferred shell-cursor reposition — set on press, applied on
+    /// release only when the press produced no selection (a pure click).
+    pub pending_cursor_reposition: Option<Point<Line>>,
     pub x: usize,
     pub y: usize,
 }
@@ -1806,6 +1809,7 @@ impl Default for Mouse {
             block_hint_launcher: Default::default(),
             inside_text_area: Default::default(),
             scrollbar_press: false,
+            pending_cursor_reposition: None,
             accumulated_scroll: Default::default(),
             x: Default::default(),
             y: Default::default(),

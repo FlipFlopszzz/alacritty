@@ -793,7 +793,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             ClickState::Click => {
                 // Fork: move the shell cursor to the clicked position when the
                 // click lands on the cursor's row of the primary screen.
-                self.reposition_cursor_to_click(point);
+                //
+                // The reposition itself is deferred to the release: emitting
+                // the arrow keys right here makes the shell repaint its input
+                // line, and the erase sequences in that repaint kill the
+                // selection started below — a drag away from the cursor used
+                // to end up with a cursor jump and no selection at all.
+                self.ctx.mouse_mut().pending_cursor_reposition = Some(point);
 
                 // Don't launch URLs if this click cleared the selection.
                 self.ctx.mouse_mut().block_hint_launcher = !self.ctx.selection_is_empty();
@@ -893,6 +899,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     fn on_mouse_release(&mut self, button: MouseButton) {
         // Fork: the press is over, wherever it landed.
         self.ctx.mouse_mut().scrollbar_press = false;
+        // Fork: consume the deferred reposition candidate; it is applied
+        // further down only when this press stayed a pure click.
+        let pending_reposition = self.ctx.mouse_mut().pending_cursor_reposition.take();
 
         // Fork: stop scrollbar dragging when the drag was on the scrollbar.
         // Under mouse reporting the release is not reported either — it
@@ -949,6 +958,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let timer_id = TimerId::new(Topic::SelectionScrolling, self.ctx.window().id());
         self.ctx.scheduler_mut().unschedule(timer_id);
+
+        // Fork: apply the deferred shell-cursor reposition. Only a pure click
+        // qualifies — a drag leaves a non-empty selection behind and keeps it,
+        // so dragging away from the cursor is a plain selection, no jump.
+        if let (MouseButton::Left, Some(point)) = (button, pending_reposition) {
+            if self.ctx.selection_is_empty() {
+                self.reposition_cursor_to_click(point);
+            }
+        }
 
         if let MouseButton::Left | MouseButton::Right = button {
             // Copy selection on release, to prevent flooding the display server.

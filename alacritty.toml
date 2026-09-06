@@ -5,10 +5,10 @@
 live_config_reload = true
 
 # ------------------------------------------------------------
-#  Shell — PowerShell 7（同 WT 默认 profile "pwsh.exe -NoLogo"）
+#  Shell — Nushell（此前为 PowerShell 7 "pwsh.exe -NoLogo"）
 # ------------------------------------------------------------
 [terminal]
-shell = { program = "pwsh.exe", args = ["-NoLogo"] }
+shell = { program = 'C:\Users\ASUS\AppData\Local\Programs\nu\bin\nu.exe', args = [] }
 
 # ------------------------------------------------------------
 #  窗口 — 同 WT defaults：padding 8、透明度 70%、120x30
@@ -22,6 +22,8 @@ dimensions = { columns = 120, lines = 30 }
 
 [scrolling]
 history = 10000
+# 滚轮每次滚动的行数（默认 3）
+multiplier = 10
 
 # ------------------------------------------------------------
 #  字体 — SauceCodePro Nerd Font 14（同 WT）
@@ -37,13 +39,12 @@ style = "Regular"
 #  光标 — WT 默认竖线（Alacritty 中叫 Beam）+ 闪烁动画
 # ------------------------------------------------------------
 [cursor]
-style = { shape = "Beam", blinking = "On" }
+style = { shape = "Beam", blinking = "on" }
 # 失焦时光标保持原样式，不变空心方框
 unfocused_hollow = false
 
-# 选中即复制到剪贴板——省掉复制键，鼠标划选即可
 [selection]
-save_to_clipboard = true
+save_to_clipboard = false
 
 # ------------------------------------------------------------
 #  配色 — One Half Dark (modified)，与 WT scheme 逐项对应
@@ -81,11 +82,9 @@ white   = "#DCDFE4"
 
 # ------------------------------------------------------------
 #  快捷键
-#  注意：Ctrl+C/Ctrl+V 故意不绑定——Alacritty 的 Copy/Paste 绑定会
-#  无条件吞掉按键（不像 WT 那样"无选区时放行"），导致 ^C 无法中断
-#  命令、CC 收不到 Ctrl+C/Ctrl+V（退出/贴图失效）。
-#  终端级复制粘贴走 Alacritty 默认键：
-#    Ctrl+Shift+C 复制选中文本，Ctrl+Shift+V 粘贴
+#  Ctrl+C → Copy 配合 fork 的智能放行：有选区执行复制，无选区放行 ^C
+#  中断命令；Ctrl+V → Paste 粘贴文本（bracketed paste），剪贴板是图片
+#  时的空粘贴事件会让 CC 自己读剪贴板贴图
 # ------------------------------------------------------------
 [[keyboard.bindings]]
 # shift+enter 发送 ESC+CR —— Claude Code 官方 /terminal-setup 写入的方案
@@ -108,8 +107,8 @@ mods = "Control"
 action = "Paste"
 
 [[keyboard.bindings]]
-# ctrl+shift+n 开新窗口（同 WT 快捷键）
-key = "N"
+# ctrl+shift+t 新建窗口（同 WT/浏览器的"新建标签"习惯键位）
+key = "T"
 mods = "Control|Shift"
 action = "CreateNewWindow"
 
@@ -118,6 +117,13 @@ action = "CreateNewWindow"
 key = "F"
 mods = "Control"
 action = "SearchForward"
+
+[[keyboard.bindings]]
+# ctrl+w 关闭窗口（同 WT；上游默认是 Super+W）。
+# 代价：shell 里 Ctrl+W 的"删除前一个词"会被占用
+key = "W"
+mods = "Control"
+action = "Quit"
 
 # ------------------------------------------------------------
 #  OSC 8 超链接 / URL
@@ -136,7 +142,7 @@ command = { program = "cmd", args = ["/c", "start", ""] }
 
 [mouse]
 # 双击判定间隔（毫秒），按你的点击节奏调小可避免误触选词
-double_click_interval = 400
+double_click_interval = 250
 
 # ------------------------------------------------------------
 #  滚动条（fork 新增功能，Alacritty 官方没有）
