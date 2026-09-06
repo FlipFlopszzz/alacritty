@@ -28,7 +28,7 @@ use winit::window::CursorIcon;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Boundary, Column, Direction, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::Match;
@@ -831,13 +831,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
     }
 
-    /// Fork: move the shell cursor to the clicked cell within the cursor's row.
+    /// Fork: move the shell cursor to the clicked cell.
     ///
-    /// The terminal grid is the single source of truth for the cursor position,
-    /// so this is deterministic. Cross-line movement is intentionally not
-    /// supported: for soft-wrapped single-line commands `Up`/`Down` trigger
-    /// history navigation in the shell, and the terminal cannot tell which
-    /// display rows belong to the current command without shell integration.
+    /// Movement is emitted purely as reading-order `Left`/`Right` character
+    /// steps. `Up`/`Down` are deliberately never used: line editors navigate
+    /// them per *logical* line, while ConPTY re-renders the screen without the
+    /// `WRAPLINE` marks that would tell visual wraps from logical lines — so
+    /// any vertical step could land in shell history. Within one logical line
+    /// the walk is exact; crossing shift+enter lines it runs over the rendered
+    /// continuation prompt cells and lands off by their width.
+    ///
+    /// The clickable input region is [`anchor row ..= last non-blank row`]
+    /// below the caret, provided by the shell's OSC 133 markers; clicks
+    /// outside it are ignored.
     fn reposition_cursor_to_click(&mut self, point: Point) {
         let term = self.ctx.terminal();
         // TUIs (vim, less, ...) live on the alternate screen; leave their
@@ -846,54 +852,88 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        let Some((input_start, input_start_col)) = term.command_input_start() else {
+            debug!("cursor reposition ignored: no OSC 133 input region marker");
+            return;
+        };
+
         let cursor = term.grid().cursor.point;
-        if cursor.line != point.line {
-            return;
-        }
-
-        // Column movement: characters between the cursor and the click,
-        // skipping the trailing half of wide characters (the shell moves the
-        // cursor per character, not per grid column).
         let cursor_col = cursor.column.0;
-        let mut click_col = point.column.0;
-        if click_col == cursor_col {
-            return;
-        }
 
-        // Count the actual characters between the cursor and the click,
-        // skipping the trailing half of wide characters: the shell moves the
-        // cursor per character, not per grid column.
+        // End of the input region: the input is the last content on screen, so
+        // the region extends from the caret down over non-blank rows only.
         let grid = term.grid();
-        if click_col < cursor_col && grid[point].flags.contains(Flags::WIDE_CHAR_SPACER) {
-            // Clicking the right half of a wide char targets that char itself.
-            click_col -= 1;
+        let width = grid.columns();
+        let mut input_end = cursor.line;
+        while input_end.0 + 1 < grid.screen_lines() as i32 {
+            let next = Line(input_end.0 + 1);
+            let non_blank = (0..width).any(|col| grid[next][Column(col)].c != ' ');
+            if !non_blank {
+                break;
+            }
+            input_end.0 += 1;
         }
-        let (range, right) = if click_col > cursor_col {
-            ((cursor_col + 1)..(click_col + 1), true)
-        } else {
-            (click_col..cursor_col, false)
-        };
 
-        let count = range
-            .filter(|col| !grid[point.line][Column(*col)].flags.contains(Flags::WIDE_CHAR_SPACER))
-            .count();
-        if count == 0 {
+        if point.line < input_start || point.line > input_end {
+            debug!(
+                "cursor reposition ignored: click {point:?} outside input region \
+                 [{input_start:?}, {input_end}]"
+            );
             return;
         }
 
-        let seq: &[u8] = if right {
-            if term.mode().contains(TermMode::APP_CURSOR) { b"\x1bOC" } else { b"\x1b[C" }
-        } else if term.mode().contains(TermMode::APP_CURSOR) {
-            b"\x1bOD"
-        } else {
-            b"\x1b[D"
+        // Clicks on the prompt itself target the first input character.
+        let mut click_col = point.column.0;
+        if point.line == input_start && click_col < input_start_col {
+            click_col = input_start_col;
+        }
+
+        // Count of non-spacer cells in a row's column range.
+        let count_chars = |row: Line, range: std::ops::Range<usize>| -> usize {
+            range
+                .filter(|col| !grid[row][Column(*col)].flags.contains(Flags::WIDE_CHAR_SPACER))
+                .count()
         };
 
-        let mut bytes = Vec::with_capacity(3 * count);
-        for _ in 0..count {
+        let app_cursor = term.mode().contains(TermMode::APP_CURSOR);
+        let left_seq: &[u8] = if app_cursor { b"\x1bOD" } else { b"\x1b[D" };
+        let right_seq: &[u8] = if app_cursor { b"\x1bOC" } else { b"\x1b[C" };
+
+        // Reading order: whether the click lies before the caret.
+        let click_before =
+            point.line < cursor.line || (point.line == cursor.line && click_col < cursor_col);
+        let (from_row, from_col, to_row, to_col) = if click_before {
+            (point.line, click_col, cursor.line, cursor_col)
+        } else {
+            (cursor.line, cursor_col, point.line, click_col)
+        };
+
+        // Walk the characters between the caret and the click in reading order.
+        let mut distance = if from_row == to_row {
+            count_chars(from_row, from_col..to_col)
+        } else {
+            let mut distance = count_chars(from_row, from_col..width);
+            for r in (from_row.0 + 1)..to_row.0 {
+                distance += count_chars(Line(r), 0..width);
+            }
+            distance += count_chars(to_row, 0..to_col);
+            distance
+        };
+        let seq: &[u8] = if click_before { left_seq } else { right_seq };
+
+        debug!(
+            "cursor reposition: click {point:?}, cursor {cursor:?}, region start {input_start:?}, \
+             {} x{distance}",
+            if click_before { "left" } else { "right" },
+        );
+
+        let mut bytes = Vec::new();
+        for _ in 0..distance {
             bytes.extend_from_slice(seq);
         }
-        self.ctx.write_to_pty(bytes);
+        if !bytes.is_empty() {
+            self.ctx.write_to_pty(bytes);
+        }
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {

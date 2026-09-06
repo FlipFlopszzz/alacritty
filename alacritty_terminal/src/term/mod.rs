@@ -265,6 +265,19 @@ impl TermDamageState {
     }
 }
 
+/// Fork: OSC 133 (FinalTerm shell integration) prompt markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMarker {
+    /// Start of the prompt.
+    PromptStart,
+    /// End of the prompt; interactive input begins at the cursor.
+    CommandStart,
+    /// End of the interactive input; command output follows.
+    CommandExec,
+    /// Command finished; the shell is about to draw a new prompt.
+    CommandFinished,
+}
+
 pub struct Term<T> {
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
@@ -327,6 +340,15 @@ pub struct Term<T> {
 
     /// Config directly for the terminal.
     config: Config,
+
+    /// Fork: OSC 133 input-region anchor — the buffer line and column (stored
+    /// together with the history size at recording time, forming an absolute
+    /// coordinate) where the shell began reading interactive input.
+    command_cursor_anchor: Option<(i32, usize, usize)>,
+
+    /// Fork: cursor position (absolute) where the last `133;A` was seen, to
+    /// tell real prompt renders from degenerate repaints.
+    pending_prompt_start: Option<(i32, usize)>,
 }
 
 /// Configuration options for the [`Term`].
@@ -441,7 +463,69 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
+            command_cursor_anchor: None,
+            pending_prompt_start: None,
         }
+    }
+
+    /// Fork: record an OSC 133 shell-integration marker.
+    ///
+    /// The `CommandStart` marker fixes the anchor of the interactive input
+    /// region at the current cursor position; `CommandExec`/`CommandFinished`
+    /// drop it again since no input region exists outside of an active prompt.
+    /// Fork: record an OSC 133 shell-integration marker.
+    ///
+    /// The `CommandStart` marker fixes the anchor of the interactive input
+    /// region at the current cursor position — but only when actual prompt
+    /// content was drawn since the matching `PromptStart`: some shells re-emit
+    /// `A`/`B` back-to-back at the caret on every repaint, which would drag
+    /// the anchor away from the prompt.
+    pub fn prompt_marker(&mut self, marker: PromptMarker) {
+        let abs_cursor = || {
+            let point = self.grid.cursor.point;
+            (point.line.0 + self.grid.history_size() as i32, point.column.0)
+        };
+
+        match marker {
+            PromptMarker::PromptStart => self.pending_prompt_start = Some(abs_cursor()),
+            PromptMarker::CommandStart => {
+                let position = abs_cursor();
+                if self.pending_prompt_start.take() != Some(position) {
+                    debug!("prompt marker: anchor accepted at {position:?}");
+                    let (line, column) = position;
+                    let history = self.grid.history_size();
+                    self.command_cursor_anchor = Some((line, column, history));
+                } else {
+                    debug!("prompt marker: degenerate repaint ignored at {position:?}");
+                }
+            },
+            PromptMarker::CommandExec | PromptMarker::CommandFinished => {
+                self.command_cursor_anchor = None;
+                self.pending_prompt_start = None;
+            },
+        }
+    }
+
+    /// Fork: buffer line and column where the current shell input region
+    /// starts, if the shell announced it via OSC 133.
+    ///
+    /// The anchor is kept as an absolute coordinate (buffer line plus the
+    /// history size at recording time) and translated against the current
+    /// history size, so it stays correct while lines scroll into history.
+    pub fn command_input_start(&self) -> Option<(Line, usize)> {
+        let (abs_line, column, anchored_history) = self.command_cursor_anchor?;
+        let anchored_history = anchored_history as i32;
+        let history = self.grid.history_size() as i32;
+        // History shrunk since the anchor was recorded: it was cleared or the
+        // grid reset, so the absolute line no longer maps to real content.
+        if history < anchored_history {
+            return None;
+        }
+        let line = Line(abs_line - history);
+        if line.0 < -history || line.0 >= self.screen_lines() as i32 {
+            return None;
+        }
+        Some((line, column))
     }
 
     /// Collect the information about the changes in the lines, which
@@ -1845,6 +1929,8 @@ impl<T: EventListener> Handler for Term<T> {
         self.title_stack = Vec::new();
         self.title = None;
         self.selection = None;
+        self.command_cursor_anchor = None;
+        self.pending_prompt_start = None;
         self.vi_mode_cursor = Default::default();
         self.keyboard_mode_stack = Default::default();
         self.inactive_keyboard_mode_stack = Default::default();
@@ -3298,5 +3384,31 @@ mod tests {
         assert_eq!(version_number("0.1.2-dev"), 1_02);
         assert_eq!(version_number("1.2.3-dev"), 1_02_03);
         assert_eq!(version_number("999.99.99"), 9_99_99_99);
+    }
+
+    #[test]
+    fn command_input_anchor_tracks_history() {
+        let size = TermSize::new(10, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        // No anchor before any marker.
+        assert_eq!(term.command_input_start(), None);
+
+        // Output, then a prompt; the input region starts at the cursor row.
+        term.newline();
+        term.newline();
+        term.prompt_marker(PromptMarker::CommandStart);
+        assert_eq!(term.command_input_start(), Some((Line(2), 0)));
+
+        // Scrolling lines into history shifts the anchor accordingly.
+        for _ in 0..5 {
+            term.newline();
+        }
+        assert_eq!(term.grid.history_size(), 3);
+        assert_eq!(term.command_input_start(), Some((Line(-1), 0)));
+
+        // Command end clears the anchor.
+        term.prompt_marker(PromptMarker::CommandFinished);
+        assert_eq!(term.command_input_start(), None);
     }
 }

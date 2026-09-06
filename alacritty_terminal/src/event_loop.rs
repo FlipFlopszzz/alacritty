@@ -16,7 +16,7 @@ use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
 use crate::event::{self, Event, EventListener, WindowSize};
 use crate::sync::FairMutex;
-use crate::term::Term;
+use crate::term::{PromptMarker, Term};
 use crate::{thread, tty};
 use vte::ansi;
 
@@ -150,8 +150,17 @@ where
                 writer.write_all(&buf[..unprocessed]).unwrap();
             }
 
-            // Parse the incoming bytes.
-            state.parser.advance(&mut **terminal, &buf[..unprocessed]);
+            // Parse the incoming bytes, intercepting OSC 133 shell-integration
+            // markers so the input-region anchor is sampled with the exact
+            // cursor position at marker time (vte swallows them otherwise).
+            let mut start = 0;
+            for (offset, marker) in state.prompt_scanner.scan(&buf[..unprocessed]) {
+                log::debug!("prompt marker received: {marker:?}");
+                state.parser.advance(&mut **terminal, &buf[start..offset]);
+                terminal.prompt_marker(marker);
+                start = offset;
+            }
+            state.parser.advance(&mut **terminal, &buf[start..unprocessed]);
 
             processed += unprocessed;
             unprocessed = 0;
@@ -402,6 +411,8 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    /// Fork: incremental OSC 133 marker scanner running alongside the parser.
+    prompt_scanner: PromptScanner,
 }
 
 impl State {
@@ -430,6 +441,91 @@ impl State {
     #[inline]
     fn set_current(&mut self, new: Option<Writing>) {
         self.writing = new;
+    }
+}
+
+/// Fork: incremental scanner for OSC 133 (FinalTerm) shell-integration
+/// markers in the raw PTY stream.
+///
+/// vte's ANSI handler has no hook for these sequences, so the stream is
+/// scanned in parallel to the parser. Reported offsets point just past the
+/// terminator, letting the parser run on exact segments around each marker.
+#[derive(Default)]
+struct PromptScanner {
+    state: ScanState,
+}
+
+#[derive(Default)]
+enum ScanState {
+    #[default]
+    Ground,
+    /// Saw `ESC` outside an OSC; a `]` opens one.
+    Esc,
+    /// Inside an OSC; contains the sequence bytes without the `ESC ]` prefix.
+    Osc(Vec<u8>),
+    /// Inside an OSC after `ESC`; a `\` completes the ST terminator.
+    OscEsc(Vec<u8>),
+}
+
+impl PromptScanner {
+    fn scan(&mut self, buf: &[u8]) -> Vec<(usize, PromptMarker)> {
+        let mut markers = Vec::new();
+
+        for (index, &byte) in buf.iter().enumerate() {
+            match std::mem::take(&mut self.state) {
+                ScanState::Ground => {
+                    if byte == 0x1b {
+                        self.state = ScanState::Esc;
+                    }
+                },
+                ScanState::Esc => match byte {
+                    b']' => self.state = ScanState::Osc(Vec::new()),
+                    0x1b => self.state = ScanState::Esc,
+                    _ => (),
+                },
+                ScanState::Osc(mut osc) => match byte {
+                    // BEL terminator.
+                    0x07 => {
+                        if let Some(marker) = prompt_marker(&osc) {
+                            markers.push((index + 1, marker));
+                        }
+                    },
+                    0x1b => self.state = ScanState::OscEsc(osc),
+                    _ => {
+                        // Prompt markers are tiny; anything longer can't be
+                        // one, but keep scanning for its terminator anyway.
+                        if osc.len() < 32 {
+                            osc.push(byte);
+                        }
+                        self.state = ScanState::Osc(osc);
+                    },
+                },
+                ScanState::OscEsc(osc) => match byte {
+                    // ST terminator.
+                    b'\\' => {
+                        if let Some(marker) = prompt_marker(&osc) {
+                            markers.push((index + 1, marker));
+                        }
+                    },
+                    // Malformed sequence; a fresh ESC may open a new one.
+                    0x1b => self.state = ScanState::Esc,
+                    _ => (),
+                },
+            }
+        }
+
+        markers
+    }
+}
+
+fn prompt_marker(osc: &[u8]) -> Option<PromptMarker> {
+    let params = osc.strip_prefix(b"133;")?;
+    match params.first() {
+        Some(b'A') => Some(PromptMarker::PromptStart),
+        Some(b'B') => Some(PromptMarker::CommandStart),
+        Some(b'C') => Some(PromptMarker::CommandExec),
+        Some(b'D') => Some(PromptMarker::CommandFinished),
+        _ => None,
     }
 }
 
@@ -482,5 +578,34 @@ impl<T> PeekableReceiver<T> {
                 res => res.ok(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PromptScanner, State};
+    use crate::term::PromptMarker;
+
+    #[test]
+    fn prompt_markers_are_extracted_across_reads() {
+        let mut scanner = PromptScanner::default();
+
+        // Unrelated sequences are ignored.
+        assert!(scanner.scan(b"output \x1b]0;title\x07more").is_empty());
+        assert!(State::default().prompt_scanner.scan(b"plain").is_empty());
+
+        // BEL-terminated markers report the offset past their terminator.
+        let markers = State::default().prompt_scanner.scan(b"\x1b]133;A\x07\x1b]133;B\x07");
+        assert_eq!(markers, vec![(8, PromptMarker::PromptStart), (16, PromptMarker::CommandStart)]);
+
+        // A marker split across two reads.
+        let mut scanner = PromptScanner::default();
+        assert!(scanner.scan(b"out \x1b]133;C").is_empty());
+        let split = scanner.scan(b"\x07tail");
+        assert_eq!(split, vec![(1, PromptMarker::CommandExec)]);
+
+        // ST-terminated marker with an extra parameter.
+        let st = PromptScanner::default().scan(b"\x1b]133;D;0\x1b\\x");
+        assert_eq!(st, vec![(11, PromptMarker::CommandFinished)]);
     }
 }
