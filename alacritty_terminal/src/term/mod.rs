@@ -493,7 +493,10 @@ impl<T> Term<T> {
         };
 
         match marker {
-            PromptMarker::PromptStart => self.pending_prompt_start = Some(abs_cursor()),
+            PromptMarker::PromptStart => {
+                debug!("prompt marker: A at {:?}", abs_cursor());
+                self.pending_prompt_start = Some(abs_cursor());
+            },
             PromptMarker::CommandStart => {
                 let position = abs_cursor();
                 if self.pending_prompt_start.take() != Some(position) {

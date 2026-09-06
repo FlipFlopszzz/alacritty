@@ -891,54 +891,135 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             click_col = click_col.max(input_start_col);
         }
 
-        // Count of non-spacer cells in a row's column range.
+        // Count of character steps in a row's column range. Wide characters
+        // take one step but occupy two cells; ConPTY repaints tend to clear
+        // the trailing cell's spacer flag, so the predecessor's width is used
+        // instead of trusting the flag alone.
         let count_chars = |row: Line, range: std::ops::Range<usize>| -> usize {
-            range
-                .filter(|col| !grid[row][Column(*col)].flags.contains(Flags::WIDE_CHAR_SPACER))
-                .count()
+            let mut count = 0;
+            let mut after_wide = range.start > 0
+                && grid[row][Column(range.start - 1)].flags.contains(Flags::WIDE_CHAR);
+            for col in range {
+                let cell = &grid[row][Column(col)];
+                if after_wide {
+                    // Trailing half of a wide character, flagged or not.
+                    after_wide = false;
+                    continue;
+                }
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                count += 1;
+                after_wide = cell.flags.contains(Flags::WIDE_CHAR);
+            }
+            count
         };
 
         let app_cursor = term.mode().contains(TermMode::APP_CURSOR);
         let left_seq: &[u8] = if app_cursor { b"\x1bOD" } else { b"\x1b[D" };
         let right_seq: &[u8] = if app_cursor { b"\x1bOC" } else { b"\x1b[C" };
+        let up_seq: &[u8] = if app_cursor { b"\x1bOA" } else { b"\x1b[A" };
+        let down_seq: &[u8] = if app_cursor { b"\x1bOB" } else { b"\x1b[B" };
 
-        // Reading order: whether the click lies before the caret.
-        let click_before =
-            point.line < cursor.line || (point.line == cursor.line && click_col < cursor_col);
-        let (from_row, from_col, to_row, to_col) = if click_before {
-            (point.line, click_col, cursor.line, cursor_col)
-        } else {
-            (cursor.line, cursor_col, point.line, click_col)
-        };
-
-        // Column where the input text starts on a row: continuation prompt
-        // cells are not buffer characters, so walks must skip over them.
-        let text_start = |row: Line| -> usize { term.input_line_start_col(row).unwrap_or(0) };
-
-        // Walk the characters between the caret and the click in reading order.
-        let mut distance = if from_row == to_row {
-            count_chars(from_row, from_col..to_col)
-        } else {
-            let mut distance = count_chars(from_row, from_col..width);
-            for r in (from_row.0 + 1)..to_row.0 {
-                let start = text_start(Line(r));
-                distance += count_chars(Line(r), start..width);
+        // Logical line index of every region row, from the OSC 133 line map.
+        let mut line_rows: Vec<(Line, usize)> = Vec::new();
+        for r in input_start.0..=input_end.0 {
+            if let Some(col) = term.input_line_start_col(Line(r)) {
+                line_rows.push((Line(r), col));
             }
-            distance += count_chars(to_row, text_start(to_row)..to_col);
-            distance
-        };
-        let seq: &[u8] = if click_before { left_seq } else { right_seq };
-
-        debug!(
-            "cursor reposition: click {point:?}, cursor {cursor:?}, region start {input_start:?}, \
-             {} x{distance}",
-            if click_before { "left" } else { "right" },
-        );
+        }
+        let logical_index = |row: Line| line_rows.iter().rposition(|(r, _)| *r <= row).unwrap_or(0);
+        let caret_logical = logical_index(cursor.line);
+        let click_logical = logical_index(point.line);
 
         let mut bytes = Vec::new();
-        for _ in 0..distance {
-            bytes.extend_from_slice(seq);
+
+        if caret_logical == click_logical {
+            // Same logical line: reedline walks `Left`/`Right` freely inside
+            // one logical line, so the reading-order cell distance is exact.
+            let click_before =
+                point.line < cursor.line || (point.line == cursor.line && click_col < cursor_col);
+            let (from_row, from_col, to_row, to_col) = if click_before {
+                (point.line, click_col, cursor.line, cursor_col)
+            } else {
+                (cursor.line, cursor_col, point.line, click_col)
+            };
+            let distance = if from_row == to_row {
+                count_chars(from_row, from_col..to_col)
+            } else {
+                let mut distance = count_chars(from_row, from_col..width);
+                for r in (from_row.0 + 1)..to_row.0 {
+                    distance += count_chars(Line(r), 0..width);
+                }
+                distance += count_chars(to_row, 0..to_col);
+                distance
+            };
+            let seq: &[u8] = if click_before { left_seq } else { right_seq };
+            debug!(
+                "cursor reposition: click {point:?}, cursor {cursor:?}, {} x{distance} (same \
+                 logical line {click_logical})",
+                if click_before { "left" } else { "right" },
+            );
+            for _ in 0..distance {
+                bytes.extend_from_slice(seq);
+            }
+        } else if click_logical < caret_logical {
+            // An earlier logical line: reedline's `Left`/`Right` stop at line
+            // boundaries, so cross them vertically instead. `Home` moves to
+            // the caret's logical line start (column 0), `Up` preserves that
+            // column across logical lines, then walk forward to the click.
+            let (start_row, start_col) = line_rows[click_logical];
+            let forward = if point.line == start_row {
+                count_chars(start_row, start_col..click_col)
+            } else {
+                let mut forward = count_chars(start_row, start_col..width);
+                for r in (start_row.0 + 1)..point.line.0 {
+                    forward += count_chars(Line(r), 0..width);
+                }
+                forward += count_chars(point.line, 0..click_col);
+                forward
+            };
+            let ups = caret_logical - click_logical;
+            debug!(
+                "cursor reposition: click {point:?}, cursor {cursor:?}, home, up x{ups}, right \
+                 x{forward} (logical {caret_logical} -> {click_logical})"
+            );
+            bytes.extend_from_slice(b"\x1b[H");
+            for _ in 0..ups {
+                bytes.extend_from_slice(up_seq);
+            }
+            for _ in 0..forward {
+                bytes.extend_from_slice(right_seq);
+            }
+        } else {
+            // A later logical line of the input: mirror of the upward case —
+            // `Home` to the caret's logical line start, `Down` per logical
+            // line (column 0 is preserved), then forward to the click.
+            let (start_row, start_col) = line_rows[click_logical];
+            let forward = if point.line == start_row {
+                count_chars(start_row, start_col..click_col)
+            } else {
+                let mut forward = count_chars(start_row, start_col..width);
+                for r in (start_row.0 + 1)..point.line.0 {
+                    forward += count_chars(Line(r), 0..width);
+                }
+                forward += count_chars(point.line, 0..click_col);
+                forward
+            };
+            let downs = click_logical - caret_logical;
+            debug!(
+                "cursor reposition: click {point:?}, cursor {cursor:?}, home, down x{downs}, right \
+                 x{forward} (logical {caret_logical} -> {click_logical})"
+            );
+            bytes.extend_from_slice(b"\x1b[H");
+            for _ in 0..downs {
+                bytes.extend_from_slice(down_seq);
+            }
+            for _ in 0..forward {
+                bytes.extend_from_slice(right_seq);
+            }
         }
+
         if !bytes.is_empty() {
             self.ctx.write_to_pty(bytes);
         }
