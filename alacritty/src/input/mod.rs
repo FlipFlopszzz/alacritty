@@ -882,10 +882,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
-        // Clicks on the prompt itself target the first input character.
+        // Clicks on a prompt itself target the first input character of that
+        // line: rows tracked via OSC 133 start at their marker's column.
         let mut click_col = point.column.0;
-        if point.line == input_start && click_col < input_start_col {
-            click_col = input_start_col;
+        if let Some(start_col) = term.input_line_start_col(point.line) {
+            click_col = click_col.max(start_col);
+        } else if point.line == input_start {
+            click_col = click_col.max(input_start_col);
         }
 
         // Count of non-spacer cells in a row's column range.
@@ -908,15 +911,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             (cursor.line, cursor_col, point.line, click_col)
         };
 
+        // Column where the input text starts on a row: continuation prompt
+        // cells are not buffer characters, so walks must skip over them.
+        let text_start = |row: Line| -> usize { term.input_line_start_col(row).unwrap_or(0) };
+
         // Walk the characters between the caret and the click in reading order.
         let mut distance = if from_row == to_row {
             count_chars(from_row, from_col..to_col)
         } else {
             let mut distance = count_chars(from_row, from_col..width);
             for r in (from_row.0 + 1)..to_row.0 {
-                distance += count_chars(Line(r), 0..width);
+                let start = text_start(Line(r));
+                distance += count_chars(Line(r), start..width);
             }
-            distance += count_chars(to_row, 0..to_col);
+            distance += count_chars(to_row, text_start(to_row)..to_col);
             distance
         };
         let seq: &[u8] = if click_before { left_seq } else { right_seq };

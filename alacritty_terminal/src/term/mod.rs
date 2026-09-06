@@ -346,6 +346,11 @@ pub struct Term<T> {
     /// coordinate) where the shell began reading interactive input.
     command_cursor_anchor: Option<(i32, usize, usize)>,
 
+    /// Fork: start position (absolute line, column) of every input line of
+    /// the current render — shells emit one `133;B` per prompt/continuation
+    /// prompt, giving an exact map of the input region's logical lines.
+    input_line_starts: Vec<(i32, usize)>,
+
     /// Fork: cursor position (absolute) where the last `133;A` was seen, to
     /// tell real prompt renders from degenerate repaints.
     pending_prompt_start: Option<(i32, usize)>,
@@ -464,6 +469,7 @@ impl<T> Term<T> {
             title: Default::default(),
             mode: Default::default(),
             command_cursor_anchor: None,
+            input_line_starts: Vec::new(),
             pending_prompt_start: None,
         }
     }
@@ -493,14 +499,24 @@ impl<T> Term<T> {
                 if self.pending_prompt_start.take() != Some(position) {
                     debug!("prompt marker: anchor accepted at {position:?}");
                     let (line, column) = position;
-                    let history = self.grid.history_size();
-                    self.command_cursor_anchor = Some((line, column, history));
+                    // A `B` on the first input line's row begins a new render:
+                    // rebuild the line map, later `B`s extend it (continuation
+                    // lines). The anchor itself never moves while editing.
+                    if self.input_line_starts.first().map(|e| e.0) == Some(line) {
+                        self.input_line_starts.clear();
+                    }
+                    self.input_line_starts.push((line, column));
+                    if self.command_cursor_anchor.is_none() {
+                        let history = self.grid.history_size();
+                        self.command_cursor_anchor = Some((line, column, history));
+                    }
                 } else {
                     debug!("prompt marker: degenerate repaint ignored at {position:?}");
                 }
             },
             PromptMarker::CommandExec | PromptMarker::CommandFinished => {
                 self.command_cursor_anchor = None;
+                self.input_line_starts.clear();
                 self.pending_prompt_start = None;
             },
         }
@@ -526,6 +542,20 @@ impl<T> Term<T> {
             return None;
         }
         Some((line, column))
+    }
+
+    /// Fork: column where the input text starts on the given row, if the row
+    /// begins one of the currently tracked input lines (a continuation prompt
+    /// was rendered there); `None` for soft-wrapped rows and old output.
+    pub fn input_line_start_col(&self, row: Line) -> Option<usize> {
+        let (_, _, anchored_history) = self.command_cursor_anchor?;
+        let anchored_history = anchored_history as i32;
+        let history = self.grid.history_size() as i32;
+        if history < anchored_history {
+            return None;
+        }
+        let abs_row = row.0 + history;
+        self.input_line_starts.iter().find(|e| e.0 == abs_row).map(|e| e.1)
     }
 
     /// Collect the information about the changes in the lines, which
