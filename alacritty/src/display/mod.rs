@@ -500,6 +500,16 @@ impl Display {
 
         window.set_visible(true);
 
+        // Fork: present again while visible, then uncloak. Cloaked windows are still
+        // composited internally, so DWM reveals the already-presented dark frame instantly.
+        #[cfg(windows)]
+        {
+            renderer.clear(background_color, config.window_opacity());
+            surface.swap_buffers(&context).expect("failed to swap buffers.");
+            renderer.finish();
+            window.set_cloaked(false);
+        }
+
         // Always focus new windows, even if no Alacritty window is currently focused.
         #[cfg(target_os = "macos")]
         window.focus_window();

@@ -203,7 +203,7 @@ impl Window {
         log::info!("Window scale factor: {scale_factor}");
         let is_x11 = matches!(window.window_handle().unwrap().as_raw(), RawWindowHandle::Xlib(_));
 
-        Ok(Self {
+        let window = Self {
             hold: options.terminal_options.hold,
             requested_redraw: false,
             title: identity.title,
@@ -214,7 +214,53 @@ impl Window {
             window,
             is_x11,
             ime_inhibitor: Default::default(),
-        })
+        };
+
+        #[cfg(windows)]
+        window.hide_from_dwm_until_first_frame();
+
+        Ok(window)
+    }
+
+    /// Fork: keep the window out of DWM composition entirely, WT-style, so nothing (style
+    /// changes, pixelformat resets, resizes, the open animation) can flash on screen before
+    /// the first frame is presented.
+    #[cfg(windows)]
+    pub fn set_cloaked(&self, cloaked: bool) {
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+
+        if let RawWindowHandle::Win32(handle) = self.raw_window_handle() {
+            let value = cloaked as i32;
+            unsafe {
+                DwmSetWindowAttribute(
+                    handle.hwnd.get() as _,
+                    DWMWA_CLOAK as u32,
+                    &value as *const i32 as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn hide_from_dwm_until_first_frame(&self) {
+        use windows_sys::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+        };
+
+        if let RawWindowHandle::Win32(handle) = self.raw_window_handle() {
+            let disable = 1i32;
+            unsafe {
+                DwmSetWindowAttribute(
+                    handle.hwnd.get() as _,
+                    DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+                    &disable as *const i32 as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+
+        self.set_cloaked(true);
     }
 
     #[inline]
