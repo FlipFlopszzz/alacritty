@@ -23,5 +23,11 @@ if (-not (Test-Path $installDir)) {
 
 Copy-Item (Join-Path $repo 'target\dist\alacritty.exe') $dst -Force
 
+# ConPTY pair vendored from the Microsoft.Windows.Console.ConPTY NuGet
+# (see windows\conpty\VERSION); conpty.dll makes alacritty spawn OpenConsole.exe.
+$conptyDir = Join-Path $repo 'windows\conpty'
+Copy-Item (Join-Path $conptyDir 'conpty.dll') $installDir -Force
+Copy-Item (Join-Path $conptyDir 'OpenConsole.exe') $installDir -Force
+
 & $dst -V
-Write-Output "installed: $dst"
+Write-Output "installed: $dst (+ conpty.dll, OpenConsole.exe)"
