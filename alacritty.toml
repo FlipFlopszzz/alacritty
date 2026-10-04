@@ -5,10 +5,10 @@
 live_config_reload = true
 
 # ------------------------------------------------------------
-#  Shell — Nushell（此前为 PowerShell 7 "pwsh.exe -NoLogo"）
+#  Shell — PowerShell 7
 # ------------------------------------------------------------
 [terminal]
-shell = { program = 'C:\Users\ASUS\AppData\Local\Programs\nu\bin\nu.exe', args = [] }
+shell = { program = 'C:\Program Files\PowerShell\7\pwsh.exe', args = ['-NoLogo'] }
 
 # ------------------------------------------------------------
 #  窗口 — 同 WT defaults：padding 8、透明度 70%、120x30
